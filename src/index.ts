@@ -4,14 +4,18 @@ import {
     getFrontend,
     Plugin,
     Setting,
-    showMessage,
+    openTab,
+    openMobileFileById,
+    type Dialog,
 } from "siyuan";
 import {DocOverlay, type OverlayConfig, type OverlaySettings, type ProtyleLike} from "./overlay/overlay";
 import {Palette, type PaletteAction} from "./overlay/toolbar";
 import {TOPBAR_SVG} from "./overlay/icons";
-import {checkPublicationBudget, cleanupRetiredDocument, DocumentRetiredError, fenceDocument, loadPayload, planDocumentDeletion, reconcileLegacy as importLegacyInk, releasePayloadCache, retiredDocumentIds, retireDocumentGeneration, savePayload, settleDocumentWrites, validDocumentId} from "./plugin/api";
+import {checkPublicationBudget, drawingCandidates, drawingGeneration, drawingSummary, kernelJSON, cleanupRetiredDocument, DocumentRetiredError, fenceDocument, loadPayload, planDocumentDeletion, reconcileLegacy as importLegacyInk, releasePayloadCache, retiredDocumentIds, retireDocumentGeneration, savePayload, settleDocumentWrites, validDocumentId} from "./plugin/api";
 import {SyncCapacityError, SyncTransientError} from "./engine/sync";
-import {cancelExports, exportStrokesDialog} from "./plugin/exportDialog";
+import {cancelExports, exportIsBusy, exportStrokesDialog} from "./plugin/exportDialog";
+import {showTextMessage as showMessage} from './plugin/text';
+import {drawingListDialog, type DrawingRow} from './plugin/drawingList';
 import {
     DEFAULT_SETTINGS,
     loadSession,
@@ -30,6 +34,7 @@ export default class PencilAnnotationPlugin extends Plugin {
     private documents = new Map<string, DocStore>();
     private palette!: Palette;
     private activeOverlay: DocOverlay | null = null;
+    private drawingList: Dialog | null = null;
 
     private settings: PencilSettings = {...DEFAULT_SETTINGS};
     private overlaySettings!: OverlaySettings;
@@ -46,6 +51,8 @@ export default class PencilAnnotationPlugin extends Plugin {
     private syncPoll: number | null = null;
     private syncErrors = new Map<string, string>();
     private deletionJobs = new Map<string, Promise<void>>();
+    private manualDeletions = new Set<string>();
+    private queuedDeletionNotices = new Set<string>();
     private deletionTail: Promise<void> = Promise.resolve();
     private cleanupQueue = new Set<string>();
     private cleanupRunning = false;
@@ -138,6 +145,7 @@ export default class PencilAnnotationPlugin extends Plugin {
             callback: () => this.toggleMode(),
         });
 
+        this.addCommand({langKey: 'drawingList', hotkey: '', callback: () => this.showDrawingList()});
         this.buildSettingDialog();
 
         // when the plugin is enabled mid-session, editors are already open and
@@ -177,6 +185,7 @@ export default class PencilAnnotationPlugin extends Plugin {
         this.unloading = true;
         this.eventBus.off("ws-main", this.onWsMain);
         cancelExports();
+        this.drawingList?.destroy();
         if (this.syncPoll !== null) window.clearInterval(this.syncPoll);
         this.syncPoll = null;
         window.removeEventListener("pagehide", this.onPageHide);
@@ -268,7 +277,10 @@ export default class PencilAnnotationPlugin extends Plugin {
         const ids = detail?.data?.ids;
         if (this.unloading || detail?.cmd !== "removeDoc" || detail.code !== 0 || !Array.isArray(ids) || ids.length > 50000 || !ids.every(validDocumentId)) return;
         for (const id of new Set<string>(ids)) {
-            if (this.deletionJobs.has(id)) continue;
+            if (this.deletionJobs.has(id)) {
+                if (this.manualDeletions.has(id)) this.queuedDeletionNotices.add(id);
+                continue;
+            }
             const store = this.documents.get(id), captured = store?.loaded ? store.generation : undefined;
             const release = fenceDocument(this, id);
             this.cleanupQueue.add(id);
@@ -443,6 +455,9 @@ export default class PencilAnnotationPlugin extends Plugin {
                     showMessage(this.t("clearDone"));
                 });
                 break;
+            case "drawings":
+                this.showDrawingList();
+                break;
             case "export":
                 if (overlay) exportStrokesDialog(overlay, this.t, this.name, () => this.reconcileLegacy(overlay));
                 break;
@@ -463,6 +478,107 @@ export default class PencilAnnotationPlugin extends Plugin {
                 overlay?.deselect();
                 break;
         }
+    }
+
+    private showDrawingList() {
+        if (this.unloading) return;
+        if (this.drawingList) { this.drawingList.element.querySelector<HTMLInputElement>('input')?.focus(); return; }
+        for (const view of this.overlays.values()) view.finalizeInput();
+        const toolbarVisibility = this.palette.toolbar.style.visibility, handleVisibility = this.palette.handle.style.visibility;
+        const restorePalette = () => { this.palette.toolbar.style.visibility = toolbarVisibility; this.palette.handle.style.visibility = handleVisibility; };
+        this.palette.toolbar.style.visibility = this.palette.handle.style.visibility = 'hidden';
+        try { this.drawingList = drawingListDialog({t: this.t,
+            candidates: async signal => [...new Set([...await drawingCandidates(this, signal), ...[...this.documents.keys()].filter(validDocumentId)])],
+            inspect: async (id, signal) => {
+                const local = this.documents.get(id);
+                const summary = await drawingSummary(this, id, signal, local?.loaded && !local.retiredDocument ? local.backup().payload : undefined);
+                const row: DrawingRow = {...summary, title: id, path: '', accessible: false, verified: true};
+                if (!summary.count) return row;
+                try {
+                    const info = await kernelJSON('/api/block/getDocInfo', {id}, signal);
+                    if (info?.id !== id || info.rootID !== id) throw new Error('Invalid document metadata');
+                    row.title = String(info.name || id).slice(0, 500); row.accessible = true;
+                    try { const path = await kernelJSON('/api/filetree/getHPathByID', {id}, signal); if (typeof path === 'string') row.path = path.slice(0, 2048); } catch { /* title/id still searchable */ }
+                } catch { row.error = this.t('drawingUnavailable'); }
+                return row;
+            },
+            open: (id, exportDocument, signal) => this.openDrawingDocument(id, exportDocument, signal),
+            remove: row => this.deleteDrawing(row),
+            canDelete: () => !window.siyuan?.config?.readonly && !window.siyuan?.isPublish,
+            onClose: () => { this.drawingList = null; restorePalette(); },
+        }); } catch (error) { restorePalette(); throw error; }
+    }
+
+    private async openDrawingDocument(id: string, exportDocument: boolean, signal: AbortSignal) {
+        if (signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+        if (this.unloading || !validDocumentId(id)) throw new Error(this.t('drawingUnavailable'));
+        if (exportIsBusy()) throw new Error(this.t('exportAlreadyRunning'));
+        if (['mobile', 'browser-mobile'].includes(getFrontend())) openMobileFileById(this.app, id);
+        else await openTab({app: this.app, doc: {id}});
+        if (!exportDocument) return;
+        const deadline = Date.now() + 15000;
+        let previous = '', refreshed: DocStore | null = null;
+        while (!this.unloading && !signal.aborted && Date.now() < deadline) {
+            if (this.deletionJobs.has(id)) throw new Error(this.t('documentDeletionPending'));
+            this.attachExisting();
+            const view = [...this.overlays.values()].find(o => o.docId === id && o.protyle.element.isConnected && (o.protyle.wysiwyg?.element.clientWidth ?? 0) >= 50);
+            if (view?.store.loaded) {
+                if (refreshed !== view.store) {
+                    const payload = await loadPayload(this, id, true, signal);
+                    if (Date.now() >= deadline) throw new Error(this.t('drawingOpenFailed'));
+                    if (signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+                    if (this.deletionJobs.has(id) || view.store.retiredDocument) throw new Error(this.t('documentDeletionPending'));
+                    if ((payload.generation ?? 0) > view.store.generation) { this.retireStore(view.store, true); continue; }
+                    view.store.mergeRemote(payload); view.refreshFromStore(); refreshed = view.store;
+                }
+                const rect = view.protyle.wysiwyg!.element.getBoundingClientRect();
+                const key = [rect.left, rect.top, rect.width, rect.height].join(',');
+                if (rect.right > 0 && rect.left < innerWidth && key === previous) {
+                    if (signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+                    if (exportIsBusy()) throw new Error(this.t('exportAlreadyRunning'));
+                    this.activeOverlay = view;
+                    exportStrokesDialog(view, this.t, this.name, () => this.reconcileLegacy(view));
+                    return;
+                }
+                previous = key;
+            }
+            await new Promise(resolve => window.setTimeout(resolve, 50));
+        }
+        throw new Error(this.t('drawingOpenFailed'));
+    }
+
+    /** Explicit management action: retire ink only; never remove the note. */
+    private async deleteDrawing(row: DrawingRow): Promise<void> {
+        const {id, generation} = row;
+        if (window.siyuan?.config?.readonly || window.siyuan?.isPublish) throw new Error(this.t('drawingReadOnly'));
+        if (this.unloading || !row.verified || !validDocumentId(id) || this.deletionJobs.has(id)) throw new Error(this.t('documentDeletionPending'));
+        this.manualDeletions.add(id);
+        const release = fenceDocument(this, id), store = this.documents.get(id);
+        for (const view of this.overlays.values()) if (view.docId === id) view.setMode(false);
+        store?.block('integrity', this.t('drawingWorking'));
+        const job = (async () => {
+            if (await drawingGeneration(this, id) !== generation) throw new Error(this.t('drawingChanged'));
+            await retireDocumentGeneration(this, id, generation, true);
+            this.cleanupQueue.add(id);
+            if (store && store.generation <= generation) this.retireStore(store);
+            await settleDocumentWrites(this, id);
+            await cleanupRetiredDocument(this, id);
+        })().finally(() => {
+            release(); this.deletionJobs.delete(id); this.manualDeletions.delete(id);
+            if (!this.unloading) {
+                if (this.queuedDeletionNotices.delete(id)) {
+                    // A real note-deletion notice raced an ink-only action. Its
+                    // lifetime is ambiguous now: retain the notice and confirm.
+                    this.failedDeletions.add(id);
+                    this.onWsMain({detail: {cmd: 'removeDoc', code: 0, data: {ids: [id]}}});
+                }
+                this.attachExisting();
+                for (const view of this.overlays.values()) if (view.docId === id) view.setMode(this.modeOn);
+                void this.onDataChanged('overwrite'); this.refreshPalette();
+            }
+        });
+        this.deletionJobs.set(id, job);
+        await job;
     }
 
     private async reconcileLegacy(overlay: DocOverlay) {
@@ -696,6 +812,10 @@ export default class PencilAnnotationPlugin extends Plugin {
             });
             return input;
         };
+
+        const listButton = document.createElement('button'); listButton.className = 'b3-button'; listButton.textContent = this.t('drawingList');
+        listButton.addEventListener('click', () => this.showDrawingList());
+        row(this.t('drawingList'), this.t('drawingListHint'), listButton);
 
         row(this.t("settingShowFloatingBall"), this.t("settingShowFloatingBallHint"),
             mkCheckbox(() => this.settings.showFloatingBall, (v) => {

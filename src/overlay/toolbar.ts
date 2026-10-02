@@ -16,7 +16,7 @@ const snapToRange = (v: number, r: { min: number; max: number; step: number }) =
     Math.min(r.max, Math.max(r.min, Math.round((v - r.min) / r.step) * r.step + r.min));
 
 export type PaletteAction =
-    | "undo" | "redo" | "clear" | "export" | "collapse" | "settings"
+    | "undo" | "redo" | "clear" | "export" | "drawings" | "collapse" | "settings"
     | "deleteSel" | "dupSel" | "doneSel";
 
 export interface PaletteState {
@@ -419,6 +419,7 @@ export class Palette {
         actionsGroup.append(
             undoBtn,
             redoBtn,
+            this.btn(ICONS.list, this.deps.i18n("drawingList"), () => this.deps.onAction("drawings")),
             this.btn(ICONS.export, this.deps.i18n("exportImage"), () => this.deps.onAction("export")),
             this.btn(ICONS.trash, this.deps.i18n("clearAll"), () => this.deps.onAction("clear")),
         );

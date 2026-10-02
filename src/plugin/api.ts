@@ -1,6 +1,7 @@
-import {showMessage, type Plugin} from "siyuan";
+import type {Plugin} from "siyuan";
+import {showTextMessage as showMessage} from './text';
 import type {PencilPayload} from "../engine/types";
-import {fingerprint, makeBase, safeId, validateBase, validateLegacy, validateSnapshot,
+import {baseValues, fingerprint, makeBase, safeId, validateBase, validateLegacy, validateSnapshot,
     MAX_FILE_BYTES, MAX_DOCUMENT_BYTES, MAX_FILES, MAX_WRITERS, MAX_BASES, snapshotCovers, SyncCapacityError, SyncIntegrityError, SyncTransientError,
     type Publication, type SyncBase, type SyncPayload, type WriterSnapshot} from "../engine/sync";
 
@@ -40,8 +41,14 @@ export async function kernelJSON(path: string, data: unknown, signal?: AbortSign
     if (result.code !== 0) throw new Error(result.msg || `Kernel error ${result.code}`);
     return result.data;
 }
-async function readFile(path: string): Promise<any | null> {
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10000);
+function readTimeout(signal?: AbortSignal) {
+    const controller = new AbortController(), abort = () => controller.abort();
+    if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, {once: true});
+    const timer = setTimeout(abort, 10000);
+    return {controller, stop: () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); }};
+}
+async function readFile(path: string, signal?: AbortSignal): Promise<any | null> {
+    const {controller, stop} = readTimeout(signal);
     try {
         const response = await fetch("/api/file/getFile", {method: "POST", headers: {"Content-Type": "application/json", ...authHeaders()},
             body: JSON.stringify({path}), signal: controller.signal});
@@ -50,12 +57,12 @@ async function readFile(path: string): Promise<any | null> {
         if (value?.code === 404) return null;
         if (typeof value?.code === "number") throw new Error(value.msg || `Read failed: ${value.code}`);
         return value;
-    } finally { clearTimeout(timer); }
+    } finally { stop(); }
 }
 interface FileEntry {name: string; isDir: boolean; isSymlink?: boolean}
 const MAX_REGISTRY_ENTRIES = 50000; // metadata-only registries, not per-document ink snapshots
-async function readDir(path: string, maxEntries = MAX_FILES): Promise<FileEntry[]> {
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10000);
+async function readDir(path: string, maxEntries = MAX_FILES, signal?: AbortSignal): Promise<FileEntry[]> {
+    const {controller, stop} = readTimeout(signal);
     try {
         const response = await fetch("/api/file/readDir", {method: "POST", headers: {"Content-Type": "application/json", ...authHeaders()},
             body: JSON.stringify({path}), signal: controller.signal});
@@ -64,7 +71,7 @@ async function readDir(path: string, maxEntries = MAX_FILES): Promise<FileEntry[
         if (result.code !== 0 || !Array.isArray(result.data)) throw new Error(result.msg || "Cannot enumerate ink snapshots");
         if (result.data.length > maxEntries) throw new SyncCapacityError("Ink snapshot directory needs maintenance; no files were discarded");
         return result.data;
-    } finally { clearTimeout(timer); }
+    } finally { stop(); }
 }
 async function putFile(path: string, data: unknown) {
     const host = window.siyuan;
@@ -120,8 +127,8 @@ const lifecycleDirectory = (plugin: Plugin, docId: string) => {
     syncDirectory(plugin, docId); return `${lifecycleRoot(plugin)}/${docId}`;
 };
 const lifecycleFile = /^(deleted|active)-([1-9]\d{0,8})\.json$/;
-async function readLifecycle(plugin: Plugin, docId: string): Promise<{generation: number; active: boolean}> {
-    const directory = lifecycleDirectory(plugin, docId), files = await readDir(directory);
+async function readLifecycle(plugin: Plugin, docId: string, signal?: AbortSignal): Promise<{generation: number; active: boolean}> {
+    const directory = lifecycleDirectory(plugin, docId), files = await readDir(directory, MAX_FILES, signal);
     let generation = 0, activeGeneration = 0;
     for (const file of files) {
         const match = lifecycleFile.exec(file.name);
@@ -131,7 +138,7 @@ async function readLifecycle(plugin: Plugin, docId: string): Promise<{generation
     }
     const known = lifetimeState(plugin).generations.get(docId) ?? 0;
     if (activeGeneration > generation) {
-        const active = await readFile(`${directory}/active-${activeGeneration}.json`);
+        const active = await readFile(`${directory}/active-${activeGeneration}.json`, signal);
         if (!active || active.version !== 1 || active.docId !== docId || active.kind !== "active" || active.generation !== activeGeneration) throw new SyncIntegrityError("Invalid document lifetime record");
         lifetimeState(plugin).generations.set(docId, Math.max(known, activeGeneration));
         throw new SyncTransientError("Document lifecycle synchronization is incomplete; older ink was not loaded");
@@ -140,7 +147,7 @@ async function readLifecycle(plugin: Plugin, docId: string): Promise<{generation
     let active = false;
     for (const kind of ["deleted", "active"] as const) {
         if (!generation || (kind === "active" && !files.some(f => f.name === `active-${generation}.json`))) continue;
-        const value = await readFile(`${directory}/${kind}-${generation}.json`);
+        const value = await readFile(`${directory}/${kind}-${generation}.json`, signal);
         if (!value || value.version !== 1 || value.docId !== docId || value.kind !== kind || value.generation !== generation) throw new SyncIntegrityError("Invalid document lifecycle record; files were preserved");
         if (kind === "active") active = true;
     }
@@ -159,8 +166,11 @@ async function writeLifecycle(plugin: Plugin, docId: string, kind: "deleted" | "
     }
     if (!matches(await readFile(path))) throw new SyncIntegrityError("Document lifecycle write could not be verified");
 }
-async function documentExists(docId: string): Promise<boolean> {
-    const result = await boundedJSON(await fetch("/api/block/getDocInfo", {method: "POST", headers: {"Content-Type": "application/json", ...authHeaders()}, body: JSON.stringify({id: docId})}));
+async function documentExists(docId: string, signal?: AbortSignal): Promise<boolean> {
+    const {controller, stop} = readTimeout(signal);
+    let result: any;
+    try { result = await boundedJSON(await fetch("/api/block/getDocInfo", {method: "POST", headers: {"Content-Type": "application/json", ...authHeaders()}, body: JSON.stringify({id: docId}), signal: controller.signal})); }
+    finally { stop(); }
     if (result.code === 0 && result.data?.id === docId && result.data?.rootID === docId) return true;
     if (result.code === -1 && result.msg === "block not found" && result.data == null) return false;
     throw new SyncTransientError("Document availability could not be checked; handwriting was preserved");
@@ -249,10 +259,13 @@ const measure = (value: object): number => {
     return bytes;
 };
 const caches = new WeakMap<Plugin, Map<string, ReadCache>>();
+function newReadCache(generation: number): ReadCache {
+    return {generation, files: new Map(), latest: new Map(), bases: new Map(), legacyChecked: false, activeReads: 0, releaseWhenIdle: false, hardError: null};
+}
 function cacheFor(plugin: Plugin, docId: string, generation = 0): ReadCache {
     const key = `${docId}/${generation}`;
     let docs = caches.get(plugin); if (!docs) { docs = new Map(); caches.set(plugin, docs); }
-    let cache = docs.get(key); if (!cache) { cache = {generation, files: new Map(), latest: new Map(), bases: new Map(), legacyChecked: false, activeReads: 0, releaseWhenIdle: false, hardError: null}; docs.set(key, cache); }
+    let cache = docs.get(key); if (!cache) { cache = newReadCache(generation); docs.set(key, cache); }
     cache.releaseWhenIdle = false;
     return cache;
 }
@@ -268,21 +281,23 @@ const baseName = /^base-([a-f0-9]{64})\.json$/;
 
 /** Read the legacy backup plus the greatest known immutable snapshot of each writer.
  * Missing/failed listings never mean deletion; deletions are explicit retired value IDs. */
-export async function loadPayload(plugin: Plugin, docId: string, checkLegacy = true): Promise<SyncPayload> {
-    const epoch = operationEpoch(plugin, docId), generation = (await readLifecycle(plugin, docId)).generation;
+export async function loadPayload(plugin: Plugin, docId: string, checkLegacy = true, signal?: AbortSignal): Promise<SyncPayload> {
+    const epoch = operationEpoch(plugin, docId), generation = (await readLifecycle(plugin, docId, signal)).generation;
     assertOperation(plugin, docId, epoch);
     if (generation) {
-        if (!await documentExists(docId)) throw new DocumentRetiredError(generation);
+        if (!await documentExists(docId, signal)) throw new DocumentRetiredError(generation);
+        if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
         await writeLifecycle(plugin, docId, "active", generation);
     }
     const cache = cacheFor(plugin, docId, generation); cache.activeReads++;
     try {
         if (!checkLegacy && cache.hardError) throw cache.hardError.kind === "capacity"
             ? new SyncCapacityError(cache.hardError.message) : new SyncIntegrityError(cache.hardError.message);
-        const result = await loadPayloadData(plugin, docId, cache, checkLegacy);
+        const result = await loadPayloadData(plugin, docId, cache, checkLegacy, false, signal);
         assertOperation(plugin, docId, epoch);
-        if ((await readLifecycle(plugin, docId)).generation !== generation) throw new SyncTransientError("Document lifetime changed during load; retry");
-        if (generation && !await documentExists(docId)) throw new DocumentRetiredError(generation);
+        if ((await readLifecycle(plugin, docId, signal)).generation !== generation) throw new SyncTransientError("Document lifetime changed during load; retry");
+        if (generation && !await documentExists(docId, signal)) throw new DocumentRetiredError(generation);
+        if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
         assertOperation(plugin, docId, epoch);
         if (checkLegacy) cache.hardError = null;
         return result;
@@ -298,10 +313,10 @@ export async function loadPayload(plugin: Plugin, docId: string, checkLegacy = t
         if (!cache.activeReads && cache.releaseWhenIdle && caches.get(plugin)?.get(`${docId}/${cache.generation}`) === cache) caches.get(plugin)!.delete(`${docId}/${cache.generation}`);
     }
 }
-async function loadPayloadData(plugin: Plugin, docId: string, cache: ReadCache, checkLegacy: boolean, skipLegacyGuard = false): Promise<SyncPayload> {
+async function loadPayloadData(plugin: Plugin, docId: string, cache: ReadCache, checkLegacy: boolean, skipLegacyGuard = false, signal?: AbortSignal): Promise<SyncPayload> {
     const directory = syncDirectory(plugin, docId, cache.generation);
     for (let attempt = 0; attempt < 2; attempt++) {
-        const files = await readDir(directory);
+        const files = await readDir(directory, MAX_FILES, signal);
         const candidates = new Map<string, {name: string; seq: number}>();
         const baseFiles: Array<{name: string; hash: string}> = [];
         for (const file of files) {
@@ -323,7 +338,7 @@ async function loadPayloadData(plugin: Plugin, docId: string, cache: ReadCache, 
         for (const file of baseFiles) {
             if (bases.has(file.hash)) continue;
             const path = `${directory}/${file.name}`;
-            const base = loadedFiles.get(path) ?? await readFile(path);
+            const base = loadedFiles.get(path) ?? await readFile(path, signal);
             if (!base) { raced = true; break; }
             validateBase(base, docId, file.hash);
             bytes += measure(base); withinBudget();
@@ -333,7 +348,7 @@ async function loadPayloadData(plugin: Plugin, docId: string, cache: ReadCache, 
             if (raced) break;
             if ((latest.get(writer)?.sequence ?? 0) >= file.seq) continue;
             const path = `${directory}/${file.name}`;
-            const snapshot = loadedFiles.get(path) ?? await readFile(path);
+            const snapshot = loadedFiles.get(path) ?? await readFile(path, signal);
             if (!snapshot) { raced = true; break; }
             validateSnapshot(snapshot, docId, writer, file.seq);
             if (snapshot.bases.some((hash: string) => !bases.has(hash))) { raced = true; break; }
@@ -344,7 +359,7 @@ async function loadPayloadData(plugin: Plugin, docId: string, cache: ReadCache, 
         }
         if (raced) { if (!attempt) continue; throw new SyncTransientError("Ink sync is incomplete; retry after synchronization finishes"); }
         if (!skipLegacyGuard && (checkLegacy || !cache.legacyChecked)) {
-            const legacy = cache.generation ? null : await readFile(`/data/storage/petal/${plugin.name}/${storageName(docId)}`);
+            const legacy = cache.generation ? null : await readFile(`/data/storage/petal/${plugin.name}/${storageName(docId)}`, signal);
             if (legacy) validateLegacy(legacy, docId);
             const currentBase = makeBase(docId, legacy as PencilPayload | null);
             if (!bases.size && !latest.size) { bases.set(currentBase.hash, currentBase); bytes += measure(currentBase); withinBudget(); }
@@ -493,6 +508,49 @@ async function savePayloadData(plugin: Plugin, publication: Publication): Promis
         }
         return false;
     }
+}
+
+export async function drawingGeneration(plugin: Plugin, docId: string): Promise<number> {
+    if (!validDocumentId(docId)) throw new SyncIntegrityError('Invalid drawing document ID');
+    return (await readLifecycle(plugin, docId)).generation;
+}
+export interface DrawingSummary {id: string; generation: number; count: number}
+export async function drawingCandidates(plugin: Plugin, signal: AbortSignal): Promise<string[]> {
+    const parent = `/data/storage/petal/${plugin.name}`;
+    syncDirectory(plugin, 'catalog');
+    const ids = new Set<string>();
+    for (const entry of await readDir(parent, MAX_REGISTRY_ENTRIES, signal)) {
+        const id = entry.name.endsWith('.json') ? entry.name.slice(0, -5) : '';
+        if (!entry.isDir && !entry.isSymlink && validDocumentId(id)) ids.add(id);
+    }
+    for (const entry of await readDir(`${parent}/sync-v2`, MAX_REGISTRY_ENTRIES, signal)) {
+        if (entry.isDir && !entry.isSymlink && validDocumentId(entry.name)) ids.add(entry.name);
+    }
+    return [...ids].sort();
+}
+/** A catalogue read must not register a restored lifetime, change a live store,
+ * or treat unavailable document metadata as proof of deletion. */
+export async function drawingSummary(plugin: Plugin, docId: string, signal: AbortSignal, local?: SyncPayload): Promise<DrawingSummary> {
+    if (!validDocumentId(docId)) throw new SyncIntegrityError('Invalid drawing document ID');
+    const epoch = operationEpoch(plugin, docId), life = await readLifecycle(plugin, docId, signal);
+    const payload = await loadPayloadData(plugin, docId, newReadCache(life.generation), true, false, signal);
+    assertOperation(plugin, docId, epoch);
+    if ((await readLifecycle(plugin, docId, signal)).generation !== life.generation) throw new SyncTransientError('Drawing changed during catalogue scan; refresh');
+    if (signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+    const sources = [payload];
+    if (local && local.docId === docId && (local.generation ?? 0) === life.generation) sources.push(local);
+    const bases = new Map<string, SyncBase>(), snapshots = new Map<string, WriterSnapshot>(), retired = new Set<string>();
+    for (const source of sources) {
+        source.bases.forEach(base => bases.set(base.hash, base));
+        for (const snapshot of source.snapshots) {
+            snapshot.retired.forEach(id => retired.add(id));
+            if ((snapshots.get(snapshot.writer)?.sequence ?? 0) <= snapshot.sequence) snapshots.set(snapshot.writer, snapshot);
+        }
+    }
+    const values = new Set<string>();
+    for (const base of bases.values()) for (const value of baseValues(base)) if (!retired.has(value.revision)) values.add(value.revision);
+    for (const snapshot of snapshots.values()) for (const value of snapshot.values) if (!retired.has(value.revision)) values.add(value.revision);
+    return {id: docId, generation: life.generation, count: values.size};
 }
 
 /** Upload a PNG to workspace assets; PDF uses the browser download path instead. */

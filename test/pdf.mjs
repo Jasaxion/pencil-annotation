@@ -18,7 +18,8 @@ try {
             if (engine === "chromium") assert.equal(await page.evaluate(() => isSecureContext), false, "exercise HTTP LAN capabilities, not localhost's secure exception");
             const result = await page.evaluate(async () => {
                 const h = window.harness;
-                const {buildNotePdfBlob} = await import("/src/plugin/exportPdf.ts");
+                const {buildNotePdfBlob: buildPdf} = await import("/src/plugin/exportPdf.ts");
+                const buildNotePdfBlob = (input, options) => buildPdf(input, {layout: 'native', ...options});
                 const docId = h.overlay.docId;
                 const blocks = Array.from({length: 12}, (_, i) => `<div data-node-id="pdf-${i}" data-type="NodeParagraph" style="height:180px;position:relative;box-sizing:border-box;margin:0">Marker ${i}<div style="position:absolute;left:20px;top:120px;width:30px;height:20px;background:#0000ff"></div></div>`).join("");
                 const input = {docId, source: h.wysiwygEl, strokes: [{id: "ink", tool: "pen", color: "#ff0000", width: 8, opacity: 1, simulate: false,
@@ -101,7 +102,8 @@ try {
             console.log(`${engine}: full PDF pages/ink pixels, bounded canvases, missing/unsafe content, decode failure and cancellation passed`);
 
             const compatibilityChecks = await page.evaluate(async () => {
-                const h = window.harness, {buildNotePdfBlob} = await import("/src/plugin/exportPdf.ts");
+                const h = window.harness, {buildNotePdfBlob: buildPdf} = await import("/src/plugin/exportPdf.ts");
+                const buildNotePdfBlob = (input, options) => buildPdf(input, {layout: 'native', ...options});
                 const docId = h.overlay.docId;
                 const p = (id, text) => `<div data-node-id="${id}" data-type="NodeParagraph" class="p">${text}</div>`;
                 const embed = id => `<div data-node-id="${id}" data-type="NodeBlockQueryEmbed" class="render-node" data-content="select * from blocks"></div>`;
@@ -208,7 +210,7 @@ try {
             assert(backup.payload.snapshots.some(snapshot => snapshot.values.length > 0), "backup must include unsaved ink");
             await page.evaluate(() => window.pdfDialog.destroy());
             missingPreview = true;
-            await showDialog(); await page.locator("[data-best-effort]").uncheck(); await page.locator('[data-action="pdf"]').click();
+            await showDialog(); await page.locator('[data-pdf-layout]').selectOption('native'); await page.locator("[data-best-effort]").uncheck(); await page.locator('[data-action="pdf"]').click();
             await page.waitForFunction(() => document.querySelector(".pa-export__status")?.textContent.includes("failed"));
             assert.equal(await page.locator('[data-action="download"]').isVisible(), false);
             await page.evaluate(() => window.pdfDialog.destroy()); missingPreview = false;

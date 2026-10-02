@@ -2,6 +2,9 @@
 import en from "../i18n/en_US.json";
 export const editors: any[] = [];
 export const messages: string[] = [];
+export const navigation: {calls: Array<{id: string; mobile: boolean}>; onOpen?: (id: string) => void} = {calls: []};
+export const openTab = async (options: {doc: {id: string}}) => { navigation.calls.push({id: options.doc.id, mobile: false}); navigation.onOpen?.(options.doc.id); };
+export const openMobileFileById = (_app: unknown, id: string) => { navigation.calls.push({id, mobile: true}); navigation.onOpen?.(id); };
 export const getAllEditor = () => editors;
 export const getFrontend = () => "browser-desktop";
 export const showMessage = (message: string) => { messages.push(message); };

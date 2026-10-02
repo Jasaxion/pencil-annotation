@@ -298,7 +298,7 @@ try {
                     if (type === "image/jpeg" && quality === .94) {
                         const bytes = this.getContext("2d").getImageData(0, 0, this.width, this.height).data;
                         let red = 0; for (let i = 0; i < bytes.length; i += 4) if (bytes[i] > 180 && bytes[i+1] < 90 && bytes[i+2] < 90) red++;
-                        window.pdfRasterStats.push({red, width: this.width, height: this.height});
+                        window.pdfRasterStats.push({red, width: this.width, height: this.height, tail: document.querySelector('.pa-pdf-host')?.textContent.includes('FINAL_PDF_SENTINEL')});
                     }
                     return original.call(this, type, quality);
                 };
@@ -309,7 +309,8 @@ try {
             await page.waitForFunction(() => /failed|ready/.test(document.querySelector(".pa-export__status")?.textContent || ""), {}, {timeout: 90000});
             const status = await page.locator(".pa-export__status").innerText(); assert.match(status, /PDF ready/, status);
             const raster = await page.evaluate(() => window.pdfRasterStats);
-            assert(raster.length > 1 && raster.at(-1).red > 0, "hidden last-block ink must appear on the last exported page");
+            assert(raster.length > 1 && raster.at(-1).red > 0 && raster.every(page => page.tail), "full source and last-block ink must remain in the current-layout PDF");
+            assert(!(await page.locator('.pa-export__warnings li').allTextContents()).some(text => text.includes('thumbnail copies follow')), 'ordinary folded/unloaded ink must stay on the note');
             const downloadPromise = page.waitForEvent("download"); await page.locator('[data-action="download"]').click();
             const download = await downloadPromise; const bytes = await readFile(await download.path());
             assert.equal(bytes.subarray(0, 4).toString(), "%PDF");
@@ -360,16 +361,43 @@ try {
             const before = await pdfFiles();
             await page.locator('.pa-handle').click();
             await page.getByRole('button', {name: 'Export note and handwriting', exact: true}).click();
+            await page.locator('[data-pdf-layout]').selectOption('native');
             await page.locator('[data-best-effort]').uncheck();
             await generate();
             const strictWarnings = await page.locator('.pa-export__warnings li').allTextContents();
             assert.equal(strictWarnings.filter(text => text.startsWith('SQL embed')).length, 2, 'strict mode verifies both regenerated embed ranges');
             assert(strictWarnings.some(text => text.includes('Block references')));
+            await api('/api/block/appendBlock', {parentID: sqlDoc, dataType: 'markdown', data: '{{{col\n\nSB_LEFT\n\nSB_RIGHT\n\n}}}'});
             await openFixture(page, sqlDoc, title, mobile);
+            await page.waitForFunction(anchor => [...document.querySelectorAll('.protyle-wysiwyg [data-type="NodeBlockQueryEmbed"]')].filter(el => el.getBoundingClientRect().width > 0).every(el => el.querySelector(`[data-node-id="${anchor}"]`)), sqlTarget);
             await page.evaluate(async anchor => {
                 const {plugin, overlay} = window.inkFixture;
                 overlay.store.addStroke('pen', {color: '#ff0000', width: 5, opacity: 1, simulate: false}, [{x: 20, y: 20, p: .5}, {x: 80, y: 25, p: .6}], {blockId: anchor, ox: 0, oy: 0});
+                const sb = overlay.protyle.wysiwyg.element.querySelector('[data-type="NodeSuperBlock"]');
+                const column = sb?.querySelector('[data-node-id]');
+                if (!column) throw new Error('Superblock fixture was not parsed');
+                const sbRect = sb.getBoundingClientRect();
+                window.superblockExpected = [...sb.children].filter(el => el.hasAttribute('data-node-id')).map(el => {
+                    const r = el.getBoundingClientRect(); return {id: el.dataset.nodeId, x: r.left - sbRect.left, y: r.top - sbRect.top, width: r.width, height: r.height};
+                });
+                overlay.store.addStroke('pen', {color: '#008800', width: 5, opacity: 1, simulate: false}, [{x: 20, y: 10, p: .6}, {x: 70, y: 12, p: .6}], {blockId: column.dataset.nodeId, ox: 0, oy: 0});
                 plugin.scheduleSave(overlay); await plugin.flushAll();
+                window.superblockPreserved = false;
+                const encode = HTMLCanvasElement.prototype.toDataURL;
+                HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
+                    if (type === 'image/jpeg' && quality === .94) {
+                        const block = document.querySelector('.pa-pdf-host [data-type="NodeSuperBlock"]');
+                        const columns = block ? [...block.children].filter(el => el.hasAttribute('data-node-id')) : [];
+                        if (columns.length >= 2) {
+                            const root = block.getBoundingClientRect();
+                            window.superblockPreserved ||= window.superblockExpected.every(expected => {
+                                const el = columns.find(el => el.dataset.nodeId === expected.id), r = el?.getBoundingClientRect();
+                                return r && Math.abs(r.left - root.left - expected.x) < 2 && Math.abs(r.top - root.top - expected.y) < 2 && Math.abs(r.width - expected.width) < 2 && Math.abs(r.height - expected.height) < 2;
+                            });
+                        }
+                    }
+                    return encode.call(this, type, quality);
+                };
             }, sqlTarget);
             const writes = [];
             page.on('request', request => { if (/\/api\/(file\/putFile|asset\/upload)$/.test(new URL(request.url()).pathname)) writes.push(request.url()); });
@@ -378,12 +406,14 @@ try {
             assert(await page.locator('[data-best-effort]').isChecked());
             const download = await generate();
             const warnings = await page.locator('.pa-export__warnings li').allTextContents();
-            assert(warnings.some(text => text.includes('historical instance identity')));
-            assert(warnings.some(text => text.includes('thumbnail copies follow')));
+            assert(warnings.some(text => text.includes('current displayed')));
+            assert(!warnings.some(text => text.includes('thumbnail copies follow')), JSON.stringify(warnings));
+            if (!mobile) assert(await page.evaluate(() => window.superblockExpected[1].x > window.superblockExpected[0].x + 50), 'desktop fixture must exercise side-by-side columns');
+            assert(await page.evaluate(() => window.superblockPreserved), 'superblock columns must preserve the current responsive editor layout');
             assert.deepEqual(writes, [], 'PDF generation/download must not upload a result');
             assert.deepEqual(await pdfFiles(), before, 'no generated PDF may remain in the kernel workspace');
             if (process.env.PENCIL_ARTIFACT_DIR) await download.saveAs(join(process.env.PENCIL_ARTIFACT_DIR, `${name}-sql-ink.pdf`));
-            console.log(`SiYuan ${name}: strict static SQL/reference export, best-effort ink appendix and no server-side PDF result passed`);
+            console.log(`SiYuan ${name}: strict fallback and current-layout SQL/superblock ink without appendix or server-side PDF result passed`);
         } finally { await browser.close(); }
     }
 
@@ -438,6 +468,55 @@ try {
         assert.equal(JSON.parse(await readFile(join(storage, `document-lifecycle/${deletionDoc}/deleted-2.json`), 'utf8')).generation, 2);
         console.log('SiYuan chromium: parent/child deletion cleanup, genuine history restore, fresh ink and cancel/confirm of reused-ID deletion passed');
     } finally { await deletionBrowser.close(); }
+    for (const [engine, mobile] of [['chromium', false], ['webkit', true]]) {
+        const title = `Manager kept note ${engine}`;
+        const id = await api('/api/filetree/createDocWithMd', {notebook, path: '/' + title, markdown: 'MANAGER_BODY_MUST_STAY\n\nThis note survives deleting handwriting.'});
+        const file = join(workspace, `data/${notebook}/${id}.sy`);
+        const browser = await ({chromium, webkit}[engine]).launch(engine === 'chromium' ? {channel: 'chromium'} : {});
+        try {
+            const context = await browser.newContext({viewport: mobile ? {width:390,height:844} : {width:1100,height:800}, isMobile:mobile, hasTouch:mobile, acceptDownloads:true});
+            await context.request.post(base + '/api/system/loginAuth', {data:{authCode}});
+            const page = await context.newPage(); await openFixture(page, id, title, mobile);
+            await page.evaluate(async () => {const {plugin,overlay}=window.inkFixture; overlay.store.addStroke('pen',{color:'#123456',width:4,opacity:1,simulate:false},[{x:70,y:70,p:.5}]);plugin.scheduleSave(overlay);await plugin.flushAll();});
+            const original = JSON.parse(await readFile(file,'utf8'));
+            const showList = async () => {
+                await page.locator('.pa-handle').click();
+                await page.getByRole('button',{name:'Drawing list',exact:true}).click();
+                await page.waitForFunction(()=>document.querySelector('.pa-drawings__status')?.textContent.includes('results'));
+                await page.getByPlaceholder('Search title, path or document ID').fill(title);
+                assert.equal(await page.locator('.pa-drawings__row').count(),1);
+                assert.equal(await page.locator('.pa-drawings').getByRole('button',{name:'Cancel',exact:true}).isVisible(),false);
+                assert.equal(await page.locator('.pa-drawings').getByRole('button',{name:'Show more',exact:true}).isVisible(),false);
+                assert.equal(await page.locator('.pa-toolbar').isVisible(),false);
+            };
+            await showList();
+            if(process.env.PENCIL_ARTIFACT_DIR) await page.screenshot({path:join(process.env.PENCIL_ARTIFACT_DIR,`${engine}-drawing-list.png`)});
+            await page.locator('.pa-drawings__row [data-action="export"]').click();
+            await page.waitForSelector('.pa-export'); await page.waitForSelector('.pa-drawings',{state:'detached'});
+            await page.locator('[data-action="pdf"]').click();
+            await page.waitForFunction(()=>/ready|failed/.test(document.querySelector('.pa-export__status')?.textContent??''),{},{timeout:90000});
+            assert.match(await page.locator('.pa-export__status').innerText(),/PDF ready/);
+            const pendingDownload=page.waitForEvent('download');await page.locator('[data-action="download"]').click();
+            assert.equal((await readFile(await (await pendingDownload).path())).subarray(0,4).toString(),'%PDF');
+            await openFixture(page,id,title,mobile); await showList();
+            await page.locator('.pa-drawings__row [data-action="delete"]').click();
+            await page.getByText('Permanently delete handwriting',{exact:true}).waitFor();
+            await page.getByRole('button',{name:'Confirm',exact:true}).click();
+            await page.waitForFunction(()=>document.querySelector('.pa-drawings__status')?.textContent.startsWith('0 results'));
+            assert.deepEqual(JSON.parse(await readFile(file,'utf8')),original,'manager must not modify or delete the source note');
+            await openFixture(page,id,title,mobile);
+            assert.equal(await page.evaluate(()=>window.inkFixture.overlay.store.strokes.length),0);
+            assert.equal(await page.evaluate(()=>window.inkFixture.overlay.store.generation),1);
+            await page.evaluate(async()=>{const {plugin,overlay}=window.inkFixture;overlay.store.addStroke('pen',{color:'#123456',width:4,opacity:1,simulate:false},[{x:50,y:50,p:.5}]);plugin.scheduleSave(overlay);await plugin.flushAll();});
+            assert((await readdir(join(workspace,`data/storage/petal/pencil-annotation/sync-v2/${id}/g1`))).some(name=>name.startsWith('w')));
+            await showList();
+            assert.match(await page.locator('.pa-drawings__detail').innerText(),/1 strokes/);
+            console.log(`SiYuan ${engine}: manager search/export/ink-only purge, unchanged note and fresh handwriting passed`);
+        } catch(error) {
+            for(const context of browser.contexts())for(const page of context.pages()){await page.screenshot({path:`/tmp/pencil-manager-failure-${engine}.png`});console.error((await page.locator('body').innerText()).slice(-1600));}
+            throw error;
+        } finally {await browser.close();}
+    }
 } finally {
     if (!startError && child.exitCode === null && child.signalCode === null) {
         const exited = once(child, "exit"); child.kill("SIGTERM");

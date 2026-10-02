@@ -1,6 +1,6 @@
 {
   "name": "pencil-annotation",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Apple Pencil handwriting / annotation layer for SiYuan documents",
   "type": "module",
   "scripts": {
@@ -10,7 +10,7 @@
     "deploy": "node scripts/copy-assets.mjs",
     "pack": "npm run build && node scripts/pack.mjs",
     "harness": "vite --port 5199",
-    "test": "node test/sync.mjs && node test/deletion.mjs && node test/regression.mjs && node test/pdf.mjs",
+    "test": "node test/sync.mjs && node test/deletion.mjs && node test/drawing-list.mjs && node test/regression.mjs && node test/pdf.mjs && node test/current-pdf.mjs",
     "test:host": "npm run build && node test/host-smoke.mjs",
     "typecheck": "tsc --noEmit"
   },

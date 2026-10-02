@@ -17,6 +17,7 @@ Handwrite on SiYuan documents with **Apple Pencil / Android pens / drawing table
 - **Pen-tip double-tap** — optionally tap the page twice to switch pen ↔ eraser. Off by default to avoid mistaking punctuation for a gesture; existing explicit preferences are preserved. This is not the pen's barrel gesture.
 - **Floating toolbar** — draggable handle + palette with position memory. Hide the handle in settings; desktop top-bar/command entry remains available, and mobile users can restore it in plugin settings. The toolbar wraps on narrow screens.
 - **Export** — full-note image-based PDF with handwriting and browser download; handwriting-only PNG save/insert; raw JSON backup including unsaved local changes.
+- **Drawing list** — search notes containing ink, open/export them or permanently delete only their handwriting; available from settings and the toolbar.
 - **English & Simplified Chinese UI**.
 
 ## Storage & multi-device sync
@@ -51,7 +52,7 @@ Version 0.3.0 keeps the existing private directory, but independent browsers no 
 
 ### Upgrade and recovery
 
-1. Back up the entire `data/storage/petal/pencil-annotation/` directory, install this 0.3.0 build, restart SiYuan and refresh all browser/PWA clients. Refresh even when the displayed version is unchanged, to replace cached scripts.
+1. Back up the entire `data/storage/petal/pencil-annotation/` directory, install **0.4.0**, restart SiYuan and refresh all browser/PWA clients. Existing storage/coordinates are retained; do not mix editing pages that still cache old scripts.
 2. Do not mix editing versions. Old clients cannot read subsequent v2 changes; replacing the script with an old version is not a data rollback.
 3. If an old client changes the legacy file, editing/saving pauses. After refreshing old clients, use **Merge legacy handwriting** in Export: it preserves the old file and adds new/changed values, never interprets absence as deletion, and keeps conflicts. This action cannot reimport retired data from a deleted document.
 4. For capacity/integrity errors, keep the page open. Undo unsent changes or download a JSON backup from Export. That backup covers loaded state and local changes, not unobserved remote data. If initial loading fails, preserve the complete server-side directory first.
@@ -60,15 +61,24 @@ File, aggregate-document, session and retirement limits are defined in `src/engi
 
 A save confirms local-kernel write/read-back, not delivery to every separate workspace. Failed writes are retained and retried a bounded number of times. Unacknowledged changes can still be lost on process kill, power failure or offline shutdown.
 
+## Drawing list (0.4.0)
+
+- Open it from the **toolbar list icon**, **plugin settings → Drawing list**, or the plugin command. One compact native dialog serves desktop and mobile.
+- Progressively inspect private handwriting storage, show live stroke counts, and search scanned titles/paths/IDs. Refresh, stop scanning or show more results. No persistent catalogue or whole-workspace note-content scan is created.
+- **Open** navigates to the note. **Export** opens the matching note and reuses the PDF/PNG/JSON dialog. Closing the manager cancels pending export preparation instead of showing a late popup.
+- **Delete ink permanently retires only the selected handwriting generation, never the note body.** Confirmation is required; stale rows/approvals cannot delete a newer generation. New handwriting remains possible in the same note. Already-confirmed cleanup finishes safely even if the window closes; history/downloaded backups and necessary retirement markers remain outside physical erasure.
+- Closed/locked notebooks, unavailable metadata or corrupt data are labelled, not treated as automatic deletion. Read-only access cannot delete ink. Large collections may take time to scan; discovered results remain usable and scanning is cancellable.
+
 ## Full PDF export
 
-- Fetch the full kernel preview and source-block inventory, including folded/unloaded content, rather than a viewport screenshot. SQL embeds and references use native static export and remain subject to query/export limits. Empty responses do not prove zero query results.
-- **Best-effort export defaults on.** Unsupported databases, diagrams or media use compatible text/placeholders; unverified blocks and degradations are listed in the PDF and dialog. Turn it off for strict validation, which stops on unverifiable content.
-- Reliably positioned ink is composited at export-local block origins. Unverifiable ink gets a labelled thumbnail appendix without changing the note. **If the document contains SQL embeds, all old block-ID-only ink is conservatively placed in the appendix:** current results cannot establish its historical embed-instance identity. Appendix previews are bounded; preserve the note/JSON backup for full data.
-- Preserve body width/typography in fixed-A4 **image PDF** pages, not searchable/selectable text. Security/access checks, source changes during preparation, final raster decode failures and page/pixel/output limits remain enforced in both modes.
-- One export job at a time; cancel/close cleanup and page-sized raster surfaces. Compatibility notes follow native content and any legitimate below-document handwriting.
-- The on-demand `pdf.js` module generates and downloads the PDF in the browser, **without uploading the generated PDF**. SiYuan may still prepare/cache referenced resources. The separate PNG-to-assets action intentionally uploads PNGs.
-- Current isolated **SiYuan 3.8.6** Chromium/WebKit tests cover SQL/references, final-page ink and unchanged server-workspace PDF files after download. Actual Docker-container and separate-workspace cloud-sync tests were not performed.
+- **Current visual layout** is the default. The full kernel source retains superblock structure and folded/unloaded content, rather than taking a viewport screenshot. Loaded SQL embeds use their currently displayed static results; unloaded regions use bounded native previews or explicit placeholders. Embedded scripts are not executed.
+- Resolve old ink against its **currently displayed block/embedded occurrence**, checking witnessed anchor dimensions, text and image references. This does not infer historical authorship. **One SQL embed no longer sends all document ink to an appendix.** Only individually missing, ambiguous or changed anchors fall back, without rewriting saved ink or the source note.
+- **Best-effort export defaults on.** Unsupported databases/diagrams/media use compatible text or placeholders and visible notes. Turning it off stops on content that cannot be validated in the selected mode. Source-change, access/security, final raster decode and page/pixel/output protections remain enforced.
+- The optional **SiYuan static preview** retains the previous export path. References may become footnotes and layout can change; this fallback remains more conservative about old SQL ink. Choose the default current layout to reproduce the page you presently see.
+- Current body width/typography produce fixed-A4 **image PDFs**, not searchable/selectable text. Current positioning is neither historical recovery nor character-level anchoring; check complex layouts after export. Individual fallback previews are bounded; keep the note/JSON backup for full data.
+- One cancellable job at a time with page-sized canvases released as work proceeds. Compatibility notes follow content and legitimate below-document handwriting.
+- On-demand `pdf.js` generates and downloads the PDF in the browser, **without uploading a generated PDF**. The kernel may still prepare/cache referenced resources. PNG-to-assets is a separate, explicit upload action.
+- Local temporary **SiYuan 3.8.6** Chromium/WebKit tests cover responsive superblocks, duplicate SQL occurrences with ink on the note, complete long documents, the manager and unchanged note files after ink deletion. No real user notes, Docker containers or separate-workspace cloud-sync runs were used.
 
 ## Install (dev build)
 
@@ -112,7 +122,7 @@ SIYUAN_KERNEL=/path/to/SiYuan-Kernel npm run test:host  # optional real-host che
 npm run pack
 ```
 
-`test/sync.mjs` checks migration and concurrent state. `test/deletion.mjs` covers explicit deletion, late writes, restored generations, stale confirmations and load races. `test/regression.mjs` retains input/storage checks; `test/pdf.mjs` checks page pixels, static embeds, compatibility appendices and failure cleanup. `test:host` uses a disposable workspace for real multi-browser concurrency, pen/mouse table controls, full PDF/SQL/reference export without PDF upload/server artifacts, and parent/child deletion with genuine history restore and confirmation/cancellation. Existing user notes are not opened.
+`test/current-pdf.mjs` checks current occurrences, superblocks, ink pixels, individual fallback and safe content. `test/drawing-list.mjs` checks the manager, readonly scans, cancellation, ink-only deletion, stale approvals and slow writes. Existing sync, deletion, input and native-preview/download suites remain in place. `test:host` exercises the real temporary SiYuan GUI and compares note files before/after manager deletion. Existing user notes are not opened.
 
 Browser/mobile-viewport automation is **not physical Android/iPad or installed-PWA certification**. Hardware pressure, OS palm rejection and interruptions still need device checks; WebKit pen injection in the tests uses synthetic events.
 

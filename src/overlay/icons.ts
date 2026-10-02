@@ -4,6 +4,7 @@ const svg = (inner: string) =>
     `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${inner}</svg>`;
 
 export const ICONS = {
+    list: svg('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h.01M10 8h7M7 12h.01M10 12h7M7 16h.01M10 16h7"/>'),
     pen: svg(
         '<path d="M12.9 4.6 19.4 11.1 8.5 22H2v-6.5L12.9 4.6z" fill="currentColor" stroke="none"/>' +
         '<path d="m15.9 1.6 2.4-.9 4 4-.9 2.4-3.5 3.5-5.5-5.5 3.5-3.5z" fill="currentColor" stroke="none"/>',

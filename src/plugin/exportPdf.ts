@@ -5,6 +5,7 @@ import {jsPDF} from "jspdf";
 import {fingerprint} from "../engine/sync";
 import {paintStrokes, StrokeRenderer, type OffsetFn} from "../engine/renderer";
 import type {Stroke} from "../engine/types";
+import {captureCurrentLayout, currentInkTarget, prepareCurrentLayout} from "./pdfLayout";
 import {appendCompatibilityReport, compatibility, mapStaticEmbeds, markChanged, placeholder, sanitizePdf, type PdfCompatibility} from "./pdfCompatibility";
 
 export interface PdfInput {docId: string; source: HTMLElement; strokes: Stroke[]}
@@ -14,6 +15,7 @@ export interface PdfOptions {
     renderers?: Record<string, (element: HTMLElement) => void>;
     onProgress?: (stage: "prepare" | "page", done: number, total: number) => void;
     bestEffort?: boolean;
+    layout?: "current" | "native";
     text?: (key: string, vars?: Record<string, string>) => string;
 }
 export interface PdfResult {blob: Blob; name: string; pages: number; warnings: string[]}
@@ -79,7 +81,11 @@ function expandIcons(body: HTMLElement, state: PdfCompatibility) {
         const svg = use.closest("svg")!;
         if (!svg.hasAttribute("viewBox") && symbol.hasAttribute("viewBox")) svg.setAttribute("viewBox", symbol.getAttribute("viewBox")!);
         const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
-        group.append(...[...symbol.childNodes].map(node => node.cloneNode(true))); use.replaceWith(group);
+        const content = document.createDocumentFragment(); content.append(...[...symbol.childNodes].map(node => node.cloneNode(true)));
+        const iconState: PdfCompatibility = {...state, changed: false, degraded: new Set()};
+        sanitizePdf(content, iconState); // referenced symbols are outside the already-sanitized fragment
+        if (iconState.changed) markChanged(use, state);
+        group.append(content); use.replaceWith(group);
     }
 }
 async function readyVisuals(body: HTMLElement, options: PdfOptions, state: PdfCompatibility) {
@@ -87,6 +93,7 @@ async function readyVisuals(body: HTMLElement, options: PdfOptions, state: PdfCo
     const dynamic: Array<{el: HTMLElement; ready: string}> = [];
     const kinds = new Set<string>();
     for (const el of body.querySelectorAll<HTMLElement>(".render-node")) {
+        if (state.staticEmbeds.has(el)) continue;
         const kind = el.dataset.subtype || el.dataset.type || "";
         const name = /math/i.test(kind) ? "math" : kind;
         if (name !== "math" || !options.renderers?.math) {
@@ -150,6 +157,7 @@ export async function buildNotePdfBlob(input: PdfInput, options: PdfOptions): Pr
     const bg = background(input.source);
     const strokes = input.strokes.map(s => ({...s, points: s.points.map(p => ({...p})),
         ...(s.anchor ? {anchor: {...s.anchor}} : {})}));
+    const current = options.layout !== "native" ? captureCurrentLayout(input.source, strokes) : null;
     options.onProgress?.("prepare", 0, 0);
     const source = await request("/api/block/getBlockDOM", {id: input.docId}, signal);
     const preview = await request("/api/export/exportPreviewHTML", {id: input.docId, image: true, keepFold: false, merge: false, addTitle: false, keepJSEmbed: false}, signal);
@@ -157,11 +165,12 @@ export async function buildNotePdfBlob(input: PdfInput, options: PdfOptions): Pr
     if (source?.id !== input.docId || after?.id !== input.docId || typeof source.dom !== "string" ||
         typeof preview?.content !== "string" || preview.id !== input.docId || preview.type !== "NodeDocument") throw new Error("Invalid full-document export response");
     if (documentFingerprint(source.dom) !== documentFingerprint(after.dom)) throw new Error("The document changed during export preparation; retry when editing stops");
-    const sourceDOM = fragment(source.dom), expected = blockIds(sourceDOM), html = fragment(preview.content);
+    const sourceDOM = fragment(source.dom), expected = blockIds(sourceDOM), html = fragment(current ? source.dom : preview.content);
     html.querySelectorAll('a[href^="pdf-outline://"]').forEach(link => link.remove());
     html.querySelector(`[data-node-id="${CSS.escape(input.docId)}"][data-type="NodeHeading"]`)?.remove();
-    await mapStaticEmbeds(sourceDOM, html, input.source, input.docId, request, signal, state);
-    for (const reference of sourceDOM.querySelectorAll('[data-type~="block-ref"]')) {
+    if (current) await prepareCurrentLayout(html, current, input.docId, request, signal, state);
+    else await mapStaticEmbeds(sourceDOM, html, input.source, input.docId, request, signal, state);
+    for (const reference of current ? [] : sourceDOM.querySelectorAll('[data-type~="block-ref"]')) {
         const block = reference.closest<HTMLElement>("[data-node-id]");
         if (!block) continue;
         const target = html.querySelector(`[data-node-id="${CSS.escape(block.dataset.nodeId!)}"]`);
@@ -180,7 +189,7 @@ export async function buildNotePdfBlob(input: PdfInput, options: PdfOptions): Pr
         if (missingSource) markChanged(missingSource, state);
         state.degraded.add(id); state.changed = true;
     }
-    for (const id of actual) if (!expected.has(id)) state.degraded.add(id);
+    if (!current) for (const id of actual) if (!expected.has(id)) state.degraded.add(id);
     if (!expected.size) throw new Error("The document is empty");
 
     const host = document.createElement("div"); host.className = "pa-pdf-host protyle"; host.inert = true;
@@ -245,12 +254,15 @@ export async function buildNotePdfBlob(input: PdfInput, options: PdfOptions): Pr
                 continue;
             }
             const id = stroke.anchor.blockId;
-            const matches = body.querySelectorAll<HTMLElement>(`[data-node-id="${CSS.escape(id)}"]`);
-            if (state.degraded.has(id) || matches.length !== 1) {
+            const target = current ? currentInkTarget(body, id, current) : (() => {
+                const matches = body.querySelectorAll<HTMLElement>(`[data-node-id="${CSS.escape(id)}"]`);
+                return matches.length === 1 ? matches[0] : null;
+            })();
+            if (state.degraded.has(id) || !target) {
                 if (!state.enabled) throw new Error(`Ink anchor is missing, converted or ambiguous in the full document: ${id}`);
                 orphans.push(stroke); continue;
             }
-            anchors.set(id, matches[0]); placed.push(stroke);
+            anchors.set(id, target); placed.push(stroke);
         }
         const beforeReport = sheet.getBoundingClientRect(), beforeBodyY = body.getBoundingClientRect().top - beforeReport.top;
         for (let i = placed.length - 1; i >= 0; i--) {

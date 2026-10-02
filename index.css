@@ -340,12 +340,31 @@
 .pa-sync-warning { width: auto; max-width: 180px; padding: 0 8px; color: #ffb4ab; font-size: 12px; }
 
 /* ---------- export dialog ---------- */
-.pa-export [hidden] { display: none !important; }
+.pa-export [hidden], .pa-drawings [hidden] { display: none !important; }
 .pa-export [aria-disabled="true"] { opacity: .45; pointer-events: none; }
 .pa-export .config-item { padding: 16px; }
 .pa-export .config-name { margin: 0 0 8px; font-size: 16px; }
 .pa-export__row, .pa-export__radios { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
 .pa-export__status { min-height: 1.4em; overflow-wrap: anywhere; }
+.pa-export__layout { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+.pa-drawings { padding: 16px; display: flex; flex-direction: column; gap: 12px; max-height: min(78dvh, 780px); box-sizing: border-box; min-width: 0; overflow: hidden; }
+.pa-drawings__tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pa-drawings__tools input { flex: 1; min-width: 120px; }
+.pa-drawings__status, .pa-drawings__hint { margin: 0; font-size: 12px; color: var(--b3-theme-on-surface); overflow-wrap: anywhere; }
+.pa-drawings__rows { min-height: 80px; overflow: auto; }
+.pa-drawings__row { display: flex; gap: 16px; align-items: center; padding: 14px 2px; border-bottom: 1px solid var(--b3-border-color, #ddd); }
+.pa-drawings__main { flex: 1; min-width: 0; }
+.pa-drawings__title { border: 0; padding: 2px 0; background: transparent; color: inherit; font: inherit; font-weight: 600; cursor: pointer; text-align: start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pa-drawings__title:disabled { cursor: default; opacity: .65; }
+.pa-drawings__title:focus-visible { outline: 2px solid var(--b3-theme-primary, #4285f4); outline-offset: 2px; }
+.pa-drawings__path { font-size: 12px; color: var(--b3-theme-on-surface); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pa-drawings__detail { font-size: 12px; margin-top: 5px; overflow-wrap: anywhere; }
+.pa-drawings__actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.pa-drawings__danger, .pa-drawings__error { color: var(--b3-theme-error, #bf3434); }
+.pa-drawings__empty { padding: 28px 8px; text-align: center; color: var(--b3-theme-on-surface); }
+.pa-drawings__more { align-self: center; }
+@media (max-width: 600px) { .pa-drawings__row { flex-direction: column; align-items: stretch; gap: 10px; } .pa-drawings__actions { justify-content: flex-end; } }
+
 .pa-export__progress { width: 100%; margin-top: 8px; }
 .pa-export__best-effort { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 .pa-export__warnings { margin-top: 10px; overflow-wrap: anywhere; }

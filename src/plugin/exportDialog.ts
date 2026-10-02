@@ -1,4 +1,5 @@
-import {confirm, Dialog, ProtyleMethod, showMessage} from "siyuan";
+import {confirm, Dialog, ProtyleMethod} from "siyuan";
+import {showTextMessage as showMessage} from './text';
 import type {DocOverlay} from "../overlay/overlay";
 import {appendBlockMarkdown, kernelJSON, uploadAssetPng} from "./api";
 import {strokesToPngBlob} from "./exportImage";
@@ -9,6 +10,7 @@ declare const __PENCIL_VERSION__: string;
 type I18nFn = (key: string, vars?: Record<string, string>) => string;
 const jobs = new Set<AbortController>();
 const dialogs = new Map<Dialog, string>();
+export const exportIsBusy = () => jobs.size > 0;
 export function cancelExports(docId?: string) {
     if (docId === undefined) for (const controller of jobs) controller.abort();
     for (const [dialog, id] of dialogs) if (docId === undefined || id === docId) dialog.destroy();
@@ -24,6 +26,7 @@ export function exportStrokesDialog(overlay: DocOverlay, t: I18nFn, pluginName =
             <section class="b3-label config-item">
                 <h3 class="config-name">${t("exportPdfSection")}</h3>
                 <p class="b3-label__text">${t("exportPdfHint")}</p>
+                <label class="pa-export__layout">${t("exportLayout")} <select class="b3-select" data-pdf-layout><option value="current">${t("exportLayoutCurrent")}</option><option value="native">${t("exportLayoutNative")}</option></select></label>
                 <label class="pa-export__best-effort"><input type="checkbox" class="b3-switch" data-best-effort checked> ${t("exportBestEffort")}</label>
                 <p class="b3-label__text">${t("exportBestEffortHint")}</p>
                 <div class="pa-export__row">
@@ -67,6 +70,7 @@ export function exportStrokesDialog(overlay: DocOverlay, t: I18nFn, pluginName =
     root.querySelector<HTMLElement>(".pa-export__blocked")!.textContent = overlay.store.blocked?.message ?? "";
     const status = root.querySelector<HTMLElement>(".pa-export__status")!;
     const progress = root.querySelector<HTMLProgressElement>("progress")!;
+    const layout = root.querySelector<HTMLSelectElement>('[data-pdf-layout]')!;
     const bestEffort = root.querySelector<HTMLInputElement>("[data-best-effort]")!;
     const warnings = root.querySelector<HTMLDetailsElement>(".pa-export__warnings")!;
     const cancel = root.querySelector<HTMLButtonElement>('[data-action="cancel"]')!;
@@ -81,7 +85,7 @@ export function exportStrokesDialog(overlay: DocOverlay, t: I18nFn, pluginName =
         const backup = root.querySelector<HTMLAnchorElement>('[data-action="backup"]')!;
         backup.setAttribute("aria-disabled", String(on || !overlay.store.loaded));
         backup.tabIndex = on || !overlay.store.loaded ? -1 : 0;
-        bestEffort.disabled = on;
+        bestEffort.disabled = on; layout.disabled = on;
         cancel.hidden = !on; progress.hidden = !on;
     };
     const begin = () => {
@@ -128,7 +132,7 @@ export function exportStrokesDialog(overlay: DocOverlay, t: I18nFn, pluginName =
     root.querySelector('[data-action="pdf"]')!.addEventListener("click", () => {
         const controller = begin(); if (!controller) return;
         download.hidden = true; warnings.hidden = true; warnings.querySelector("ul")!.replaceChildren();
-        const compatible = bestEffort.checked;
+        const compatible = bestEffort.checked, selectedLayout = layout.value === "native" ? "native" : "current";
         void (async () => {
             try {
                 if (!overlay.store.loaded) throw new Error("Wait for handwriting to load before exporting");
@@ -138,7 +142,7 @@ export function exportStrokesDialog(overlay: DocOverlay, t: I18nFn, pluginName =
                 // A separate browser ESM asset keeps PDF dependencies out of normal handwriting startup.
                 const url = __PENCIL_DEV__ ? "/src/plugin/exportPdf.ts" : `/plugins/${encodeURIComponent(pluginName)}/pdf.js?v=${encodeURIComponent(__PENCIL_VERSION__)}`;
                 const module = await import(/* @vite-ignore */ url) as typeof PdfModule;
-                const result = await module.buildNotePdfBlob(input, {signal: controller.signal, request: kernelJSON, bestEffort: compatible, text: t,
+                const result = await module.buildNotePdfBlob(input, {signal: controller.signal, request: kernelJSON, bestEffort: compatible, layout: selectedLayout, text: t,
                     renderers: {math: el => ProtyleMethod.mathRender(el)},
                     onProgress: (stage, done, total) => {
                         if (disposed || controller.signal.aborted) return;

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 (2026-10-03)
+
+- Add default current-visual-layout PDF export using the complete kernel source, preserving superblock structure and current displayed SQL instances. Resolve ink against witnessed current occurrences instead of routing the whole document to an appendix; check dimensions/content and retain per-stroke fallback for unresolved regions. Saved stroke data is not rewritten.
+- Keep the previous SiYuan static-preview layout as an explicit alternative. Preserve best-effort/strict options, whole-document checks, bounded rendering, cancellation and browser-only PDF download.
+- Add the Drawing list window from toolbar/settings/command: progressive read-only discovery, live counts including loaded unsaved ink, title/path/ID search, open/export, refresh/cancel and narrow-screen layout.
+- Add confirmed permanent ink-only cleanup from the list, reusing generation retirement and write fences. Preserve note files, newer generations and normal note-deletion handling, including notifications racing a management action.
+- Harden closed-window export cancellation, read-only controls, focus/visibility behavior, untrusted error/title text and PDF active content/referenced SVG symbols. Unsupported canvas/animation/refresh content is reported rather than silently executed or omitted.
+- Extend Chromium/WebKit regression and isolated SiYuan 3.8.6 host checks for current-layout ink pixels, responsive superblocks, duplicate embed IDs, GUI operations, unchanged note files, fresh writing after cleanup, cancellation and stale approvals. Existing input/sync/native-export checks remain enabled; no real user notes or remote Docker/cloud tests were used.
+
 ## 0.3.0 (2026-10-02)
 
 - Adopt block-relative anchored ink with deterministic legacy migration, preserved zero origins/fallback placement, export-local projections, and atomic reanchor/undo geometry.

@@ -1,8 +1,8 @@
 {
   "name": "pencil-annotation",
   "author": "Ray Zhang",
-  "url": "https://github.com/BUGdefender404/pencil-annotation",
-  "version": "0.3.0",
+  "url": "https://github.com/Jasaxion/pencil-annotation",
+  "version": "0.4.0",
   "minAppVersion": "3.1.0",
   "kernels": ["windows", "linux", "darwin", "android", "ios", "harmony"],
   "backends": ["windows", "linux", "darwin", "docker", "android", "ios", "harmony"],
@@ -12,8 +12,8 @@
     "zh-CN": "Pencil 手写批注"
   },
   "description": {
-    "default": "Handwrite on your documents with Apple Pencil or a stylus: pressure-sensitive pen, highlighter, eraser, selection, and sync-safe storage.",
-    "zh-CN": "用 Apple Pencil/触控笔在文档上手写批注：压感钢笔、荧光笔、橡皮擦、笔迹选择移动，笔迹随思源同步，不惧换机与重装。"
+    "default": "Pressure-sensitive handwriting with sync-safe storage, current-layout PDF export and a drawing document manager.",
+    "zh-CN": "压感钢笔、荧光笔、橡皮与笔迹移动；支持安全同步、当前排版 PDF 导出和绘制文档列表管理。"
   },
   "readme": {
     "default": "README.md",

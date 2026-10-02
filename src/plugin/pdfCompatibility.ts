@@ -7,12 +7,13 @@ export interface PdfCompatibility {
     degraded: Set<string>;
     changed: boolean;
     uncertainEmbedScope: boolean;
+    staticEmbeds: Set<Element>;
     text: (key: string, fallback: string, vars?: Record<string, string>) => string;
     warn: (message: string) => void;
 }
 export function compatibility(enabled: boolean, translate?: (key: string, vars?: Record<string, string>) => string): PdfCompatibility {
     const warnings: string[] = [];
-    return {enabled, warnings, degraded: new Set(), changed: false, uncertainEmbedScope: false,
+    return {enabled, warnings, degraded: new Set(), changed: false, uncertainEmbedScope: false, staticEmbeds: new Set(),
         text: (key, fallback, vars = {}) => {
             const translated = translate?.(key, vars);
             return translated && translated !== key ? translated : Object.entries(vars).reduce((text, [key, value]) => text.split(`{${key}}`).join(value), fallback);
@@ -46,9 +47,9 @@ export function placeholder(node: Element, state: PdfCompatibility, message: str
     node.replaceWith(box);
 }
 export function sanitizePdf(root: DocumentFragment, state: PdfCompatibility) {
-    const unsafe = "script,style,link,base,iframe,object,embed,audio,video,[data-type='NodeAttributeView'],[data-type='NodeWidget'],[data-type='NodeBlockQueryEmbed']";
+    const unsafe = "script,style,link,base,meta,iframe,object,embed,audio,video,canvas,animate,animateMotion,animateTransform,set,[data-type='NodeAttributeView'],[data-type='NodeWidget'],[data-type='NodeBlockQueryEmbed']";
     for (const node of [...root.querySelectorAll(unsafe)]) {
-        if (!root.contains(node)) continue;
+        if (!root.contains(node) || state.staticEmbeds.has(node)) continue;
         if (!state.enabled) throw new Error("This document contains an unresolved database/media/embed. Full PDF export was stopped instead of omitting it");
         const kind = node.getAttribute("data-type") || node.tagName.toLowerCase();
         placeholder(node, state, state.text("exportUnsupported", "Unsupported {kind}: compatible placeholder", {kind}));
