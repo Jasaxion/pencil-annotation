@@ -7,7 +7,8 @@ import {
 import {paintOne, paintStrokes, StrokeRenderer, type OffsetFn, type Viewport} from "../engine/renderer";
 import {recognizeShape} from "../engine/shapes";
 import {DocStore} from "../engine/store";
-import type {PencilPayload, Point, Stroke, StrokeAnchor, ToolId} from "../engine/types";
+import type {Point, Stroke, StrokeAnchor, ToolId} from "../engine/types";
+import {SyncCapacityError, SyncIntegrityError, type InkPayload} from "../engine/sync";
 
 /** Minimal structural view of a SiYuan protyle — keeps the overlay testable. */
 export interface ProtyleLike {
@@ -46,7 +47,7 @@ export interface OverlayDeps {
     onStateChange: () => void;
     /** pencil double-tap wants a pen<->eraser switch */
     onDoubleTapToggle: () => void;
-    loadPayload: (docId: string) => Promise<PencilPayload | null>;
+    loadPayload: (docId: string) => Promise<InkPayload | null>;
     store?: DocStore;
     onActivate?: () => void;
     onLoadError?: (error: unknown) => void;
@@ -103,7 +104,7 @@ export class DocOverlay {
     private eraseHitSomething = false;
 
     // selection drag
-    private selDrag: { lastX: number; lastY: number; totalDx: number; totalDy: number } | null = null;
+    private selDrag: {lastX: number; lastY: number; totalDx: number; totalDy: number; before: Stroke[]} | null = null;
 
     // Only the owning pointer may change an in-progress stroke.
     private touchPointers = new Set<number>();
@@ -131,7 +132,7 @@ export class DocOverlay {
     private constructor(protyle: ProtyleLike, deps: OverlayDeps) {
         this.protyle = protyle;
         this.deps = deps;
-        this.docId = protyle.options?.rootId || protyle.block?.rootID || "";
+        this.docId = protyle.block?.rootID || protyle.options?.rootId || "";
         this.store = deps.store ?? new DocStore(this.docId);
 
         const el = protyle.element;
@@ -156,7 +157,7 @@ export class DocOverlay {
     }
 
     static attach(protyle: ProtyleLike, deps: OverlayDeps): DocOverlay | null {
-        const docId = protyle.options?.rootId || protyle.block?.rootID;
+        const docId = protyle.block?.rootID || protyle.options?.rootId;
         if (!docId) return null;
         return new DocOverlay(protyle, deps);
     }
@@ -220,6 +221,12 @@ export class DocOverlay {
         return target instanceof Node && !!this.contentEl?.contains(target) && !this.root.contains(target);
     }
 
+    /** SiYuan 3.8 places these editing controls beside, not inside, the content scroller. */
+    private editorControlOwner(target: EventTarget | null): Element | null {
+        if (!(target instanceof Element) || target.closest(".pa-toolbar, .pa-handle")) return null;
+        return target.closest(".protyle-table-control, .protyle-gutters")?.closest(".protyle") ?? null;
+    }
+
     private consume(e: Event) {
         if (e.cancelable) e.preventDefault();
         e.stopImmediatePropagation();
@@ -256,6 +263,11 @@ export class DocOverlay {
             (this.blockedActivation.contains(target) || target.contains(this.blockedActivation));
         if (!inEditor && !blockedTarget) return;
         const pointerType = (e as PointerEvent).pointerType;
+        const controlOwner = this.editorControlOwner(e.target);
+        if (controlOwner && controlOwner !== this.protyle.element) return;
+        if (this.mode && pointerType === "pen" && controlOwner === this.protyle.element) {
+            this.consume(e); return;
+        }
         const fromTouch = (e as MouseEvent & {sourceCapabilities?: {firesTouchEvents?: boolean}}).sourceCapabilities?.firesTouchEvents;
         if (this.mode && this.inContent(e.target) && (pointerType === "pen" || pointerType === "touch" || fromTouch)) {
             this.consume(e);
@@ -391,34 +403,29 @@ export class DocOverlay {
         return null;
     }
 
-    private blockOffsetCache = new Map<string, {dx: number; dy: number}>();
+    private blockOffsetCache = new Map<string, {dx: number; dy: number} | null>();
+    private lastKnownOrigin = new Map<string, {dx: number; dy: number}>();
 
-    /**
-     * Per-stroke render offset: how far the stroke's anchor block has moved
-     * since the stroke was drawn. Strokes without an anchor never move.
-     */
+    /** Committed ink is block-relative. Cache only a block's current origin,
+     * never a per-stroke creation delta under a shared block ID. */
     private buildOffsets(): OffsetFn {
         this.blockOffsetCache.clear();
         const w = this.wysiwygEl;
-        const zero = {dx: 0, dy: 0};
-        if (!w) return () => zero;
-        const wr = w.getBoundingClientRect();
+        const wr = w?.getBoundingClientRect();
         return (s: Stroke) => {
-            if (!s.anchor) return zero;
-            let d = this.blockOffsetCache.get(s.anchor.blockId);
-            if (!d) {
-                d = {dx: 0, dy: 0};
-                const el = w.querySelector<HTMLElement>(`[data-node-id="${s.anchor.blockId}"]`);
-                if (el) {
+            if (!s.anchor) return {dx: 0, dy: 0};
+            const id = s.anchor.blockId;
+            if (!this.blockOffsetCache.has(id)) {
+                const el = w?.querySelector<HTMLElement>(`[data-node-id="${CSS.escape(id)}"]`);
+                let origin = this.lastKnownOrigin.get(id) ?? null;
+                if (el && wr) {
                     const r = el.getBoundingClientRect();
-                    d = {
-                        dx: Math.round((r.left - wr.left - s.anchor.ox) * 100) / 100,
-                        dy: Math.round((r.top - wr.top - s.anchor.oy) * 100) / 100,
-                    };
+                    origin = {dx: r.left - wr.left, dy: r.top - wr.top};
+                    this.lastKnownOrigin.set(id, origin);
                 }
-                this.blockOffsetCache.set(s.anchor.blockId, d);
+                this.blockOffsetCache.set(id, origin);
             }
-            return d;
+            return this.blockOffsetCache.get(id) ?? (s.fallback ? {dx: s.fallback[0], dy: s.fallback[1]} : null);
         };
     }
 
@@ -514,10 +521,10 @@ export class DocOverlay {
             ctx.stroke();
             ctx.restore();
         } else if (this.selected.length > 0) {
-            const boxes = this.selected.map((s) => {
+            const boxes = this.selected.flatMap((s) => {
                 const b = this.renderer.getPath(s).bbox;
                 const o = offsetsFn(s);
-                return {minX: b.minX + o.dx, minY: b.minY + o.dy, maxX: b.maxX + o.dx, maxY: b.maxY + o.dy};
+                return o ? [{minX: b.minX + o.dx, minY: b.minY + o.dy, maxX: b.maxX + o.dx, maxY: b.maxY + o.dy}] : [];
             });
             const box = unionBBox(boxes);
             if (box) {
@@ -557,69 +564,42 @@ export class DocOverlay {
                 }).finally(() => { this.store.loading = null; });
                 await this.store.loading;
             }
-            if (this.destroyed) return;
-            if (this.anchorLegacyStrokes()) this.changed();
-            this.scheduleRedraw();
-            this.deps.onStateChange();
         } catch (e) {
-            if (!this.destroyed) this.deps.onLoadError?.(e);
+            // Another view or a declined-deletion recovery may have completed a
+            // newer load. Its good state must not be poisoned by this old error.
+            if (this.destroyed || this.store.loaded || this.store.retiredDocument) return;
+            if (e instanceof SyncIntegrityError || e instanceof SyncCapacityError) {
+                this.store.block(e instanceof SyncCapacityError ? "capacity" : "integrity", String(e));
+                this.deps.onStateChange();
+            }
+            this.deps.onLoadError?.(e);
             console.error("[pencil-annotation] load failed", e);
+            return;
         }
+        if (this.destroyed) return;
+        this.scheduleRedraw();
+        this.deps.onStateChange();
+    }
+
+    refreshFromStore() {
+        this.renderer.clear();
+        // A barrier may arrive mid-drag. Keep its selected objects until the
+        // complete before/after gesture has committed; never turn it into deletion.
+        if (this.activePointerId === null) this.selected = [];
+        this.scheduleRedraw();
     }
 
     /** merge strokes coming from another device via sync */
-    applyRemote(payload: PencilPayload): boolean {
+    applyRemote(payload: InkPayload): boolean {
         if (!this.store.loaded || (payload.docId && payload.docId !== this.docId)) return false;
         const changed = this.store.mergeRemote(payload);
         if (changed) {
-            this.anchorLegacyStrokes();
+            this.renderer.clear();
+            this.deselect();
             this.scheduleRedraw();
+            this.deps.onStateChange();
         }
         return changed;
-    }
-
-    /**
-     * Strokes drawn before block anchoring existed have no anchor and would sit
-     * still through reflow. Anchor each of them to the block under its first
-     * point (offset is captured at the current position, so nothing moves now —
-     * the stroke just starts following that block from here on).
-     * @returns true if any stroke gained an anchor
-     */
-    private anchorLegacyStrokes(): boolean {
-        const w = this.wysiwygEl;
-        if (!w) return false;
-        const blocks = [...w.querySelectorAll<HTMLElement>("[data-node-id]")];
-        if (blocks.length === 0) return false;
-        const wr = w.getBoundingClientRect();
-        let any = false;
-        for (const s of this.store.strokes) {
-            if (s.anchor) continue;
-            const p0 = s.points[0];
-            if (!p0) continue;
-            const sx = wr.left + p0.x;
-            const sy = wr.top + p0.y;
-            let hit: HTMLElement | null = null;
-            for (const el of blocks) {
-                const r = el.getBoundingClientRect();
-                const pad = hit ? 0 : 24; // exact containment first, then a small margin
-                if (sx >= r.left - pad && sx <= r.right + pad && sy >= r.top - pad && sy <= r.bottom + pad) {
-                    hit = el; // pre-order: later matches are deeper blocks
-                }
-            }
-            if (hit) {
-                const o = this.blockOrigin(hit);
-                if (o) {
-                    s.anchor = {
-                        blockId: hit.dataset.nodeId!,
-                        ox: Math.round(o.x * 100) / 100,
-                        oy: Math.round(o.y * 100) / 100,
-                    };
-                    any = true;
-                }
-            }
-        }
-        if (any) this.store.dirty = true; // so the retro-anchored payload gets saved
-        return any;
     }
 
     // ---------------------------------------------------------------- mode
@@ -700,6 +680,7 @@ export class DocOverlay {
     }
 
     deleteSelection() {
+        this.finalizeInput();
         if (this.selected.length === 0) return;
         const ids = new Set(this.selected.map((s) => s.id));
         this.store.eraseWhere((s) => ids.has(s.id));
@@ -709,6 +690,7 @@ export class DocOverlay {
     }
 
     duplicateSelection() {
+        this.finalizeInput();
         if (this.selected.length === 0) return;
         for (const s of [...this.selected]) {
             const copy = this.store.duplicateStroke(s);
@@ -719,6 +701,7 @@ export class DocOverlay {
     }
 
     deselect() {
+        if (this.selDrag) this.finalizeInput();
         if (this.selected.length === 0) return;
         this.selected = [];
         this.scheduleRedraw();
@@ -736,6 +719,20 @@ export class DocOverlay {
         const owner = DocOverlay.inputOwner;
         if (e.pointerType === "touch" && owner && owner !== this) { owner.onPointerDown(e); return; }
         const palm = this.mode && owner === this && e.pointerType === "touch";
+        const controlOwner = this.editorControlOwner(e.target);
+        if (controlOwner && !palm) {
+            if (this.mode && e.pointerType === "pen" && controlOwner === this.protyle.element) {
+                if (this.activePointerId === e.pointerId && (e.button === 0 || e.button === 5)) this.finalizeInput();
+                this.consume(e);
+                this.blockedActivation = this.protyle.element;
+                this.ownedPointers.set(e.pointerId, this.blockedActivation);
+                this.lastInput = "drawing";
+                return; // editing controls are isolated, not an extension of the drawing plane
+            }
+            if (this.activePointerId === e.pointerId) this.finalizeInput();
+            this.ownedPointers.delete(e.pointerId); this.markNativePointer(e);
+            return;
+        }
         if (!this.inContent(e.target) && !palm) {
             if (this.activePointerId === e.pointerId) this.finalizeInput();
             this.ownedPointers.delete(e.pointerId);
@@ -768,7 +765,7 @@ export class DocOverlay {
         // Barrel-button changes may arrive with the tip still down. Only a
         // physical tip/eraser contact starts ink; every pen stream stays isolated.
         if (e.pointerType === "pen" ? !(e.buttons & 33) && e.button !== 0 && e.button !== 5 : e.button !== 0) return;
-        if (!this.store.loaded) return;
+        if (!this.store.canEdit) return;
         if (this.activePointerId !== null) {
             if (e.pointerType !== this.activePointerType || (e.button !== 0 && e.button !== 5)) return;
             // A fresh physical down recovers from an up lost outside the window.
@@ -781,6 +778,7 @@ export class DocOverlay {
         const pt = this.toDoc(e);
         this.activePointerId = e.pointerId;
         this.activePointerType = e.pointerType;
+        this.store.beginInput();
         DocOverlay.inputOwner = this;
         this.strokeConfig = {...this.deps.config};
         if (e.pointerType === "pen" && (e.buttons & 32)) this.strokeConfig.tool = "eraser";
@@ -805,11 +803,11 @@ export class DocOverlay {
             const offsets = this.buildOffsets();
             const hit = this.store.strokes.find((s) => {
                 const o = offsets(s);
-                return pointHitsStroke(s, pt.x - o.dx, pt.y - o.dy, SELECT_THRESHOLD);
+                return o ? pointHitsStroke(s, pt.x - o.dx, pt.y - o.dy, SELECT_THRESHOLD) : false;
             });
             this.selected = hit ? [hit] : [];
             if (hit) {
-                this.selDrag = {lastX: pt.x, lastY: pt.y, totalDx: 0, totalDy: 0};
+                this.selDrag = {lastX: pt.x, lastY: pt.y, totalDx: 0, totalDy: 0, before: this.store.snapshotStrokes(this.selected)};
             }
             this.redrawLive();
             this.deps.onStateChange();
@@ -848,6 +846,8 @@ export class DocOverlay {
     private sampleInput(e: PointerEvent, final = false) {
         if (!this.drawing && !this.erasing && !this.selDrag) return;
         const pt = this.toDoc(e);
+        const liveOffset = this.drawing ? this.liveOffset() : {dx: 0, dy: 0};
+        pt.x -= liveOffset.dx; pt.y -= liveOffset.dy;
         let events: PointerEvent[] = [];
         try { events = e.getCoalescedEvents?.() ?? []; } catch { /* use the dispatched sample */ }
         const samples = [...events, e];
@@ -866,7 +866,7 @@ export class DocOverlay {
             for (const ev of samples) {
                 const last = this.curPoints[this.curPoints.length - 1];
                 const pressure = final && ev.pressure === 0 ? last.p : Math.max(0.04, Math.min(1, ev.pressure || 0.25));
-                const p = {x: ev.clientX - rect.left, y: ev.clientY - rect.top,
+                const p = {x: ev.clientX - rect.left - liveOffset.dx, y: ev.clientY - rect.top - liveOffset.dy,
                     p: this.activePointerType === "pen" ? pressure : 0.5};
                 if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
                 // Keep short turns and pressure changes; only exact duplicates add no information.
@@ -922,10 +922,7 @@ export class DocOverlay {
             this.redrawLive();
             if (this.eraseHitSomething) this.changed();
         } else if (this.selDrag) {
-            this.store.commitMove(this.selected, this.selDrag.totalDx, this.selDrag.totalDy);
-            this.reanchorStrokes(this.selected);
-            this.selDrag = null;
-            this.changed();
+            this.commitSelectionMove();
         }
         this.finishPointer();
     };
@@ -957,6 +954,12 @@ export class DocOverlay {
         this.curPoints = [];
         this.curAnchor = null;
         this.clearShapeSnap();
+        if (id !== null && this.store.endInput()) {
+            this.renderer.clear();
+            this.deselect();
+            this.scheduleRedraw();
+            this.changed();
+        }
         this.redrawLive();
     }
 
@@ -1085,11 +1088,7 @@ export class DocOverlay {
         this.flushPendingDot();
         if (this.drawing && this.curPoints.length) this.commitStroke(this.shapeSnap ?? this.curPoints);
         if (this.erasing && this.eraseHitSomething) this.changed();
-        if (this.selDrag) {
-            this.store.commitMove(this.selected, this.selDrag.totalDx, this.selDrag.totalDy);
-            this.reanchorStrokes(this.selected);
-            this.changed();
-        }
+        this.commitSelectionMove();
         this.finishPointer();
         this.touchPointers.clear();
         this.lastPenTap = {t: 0, x: 0, y: 0};
@@ -1107,16 +1106,38 @@ export class DocOverlay {
         }
     }
 
+    private commitSelectionMove() {
+        const drag = this.selDrag;
+        if (!drag) return;
+        this.selDrag = null;
+        if (!drag.totalDx && !drag.totalDy) {
+            // Out-and-back drags must not leave accumulated rounding in the reused view.
+            for (const stroke of this.selected) {
+                const original = drag.before.find(s => s.revision === stroke.revision);
+                if (original) stroke.points = original.points.map(p => ({...p}));
+            }
+            return;
+        }
+        this.reanchorStrokes(this.selected);
+        this.selected = this.store.commitMove(this.selected, drag.totalDx, drag.totalDy, drag.before);
+        this.changed();
+    }
+
     /** after a drag, re-anchor moved strokes to the block under their new position */
     private reanchorStrokes(strokes: Stroke[]) {
         const w = this.wysiwygEl;
         if (!w || strokes.length === 0) return;
         const wr = w.getBoundingClientRect();
+        const offsets = this.buildOffsets();
         for (const s of strokes) {
-            const p0 = s.points[0];
-            if (!p0) continue;
-            const anchor = this.captureAnchor(wr.left + p0.x, wr.top + p0.y);
-            if (anchor) s.anchor = anchor;
+            const p0 = s.points[0], offset = offsets(s);
+            if (!p0 || !offset) continue;
+            const anchor = this.captureAnchor(wr.left + p0.x + offset.dx, wr.top + p0.y + offset.dy);
+            if (anchor) {
+                s.points = s.points.map(p => ({x: p.x + offset.dx - anchor.ox, y: p.y + offset.dy - anchor.oy, p: p.p}));
+                s.anchor = {blockId: anchor.blockId, ox: 0, oy: 0};
+                s.fallback = [anchor.ox, anchor.oy];
+            }
         }
     }
 
@@ -1169,7 +1190,7 @@ export class DocOverlay {
         if (!this.curAnchor) return {dx: 0, dy: 0};
         const w = this.wysiwygEl;
         if (!w) return {dx: 0, dy: 0};
-        const el = w.querySelector<HTMLElement>(`[data-node-id="${this.curAnchor.blockId}"]`);
+        const el = w.querySelector<HTMLElement>(`[data-node-id="${CSS.escape(this.curAnchor.blockId)}"]`);
         if (!el) return {dx: 0, dy: 0};
         const wr = w.getBoundingClientRect();
         const r = el.getBoundingClientRect();
@@ -1186,9 +1207,10 @@ export class DocOverlay {
         const stroke = tool === "pen"
             ? {color: cfg.penColor, width: cfg.penWidth, opacity: 1}
             : {color: cfg.hlColor, width: cfg.hlWidth, opacity: 0.45};
-        const committed = this.store.addStroke(tool, {...stroke, simulate}, points);
         const a = anchor !== undefined ? anchor : this.curAnchor;
-        if (a) committed.anchor = a;
+        const relative = a ? points.map(p => ({x: p.x - a.ox, y: p.y - a.oy, p: p.p})) : points;
+        const committed = this.store.addStroke(tool, {...stroke, simulate}, relative,
+            a ? {blockId: a.blockId, ox: 0, oy: 0} : undefined, a ? [a.ox, a.oy] : undefined);
         this.paintCommitted(committed);
         this.changed();
         return committed;
@@ -1200,7 +1222,7 @@ export class DocOverlay {
         const removed = this.store.eraseWhere((s) => {
             const o = offsets(s);
             // shift the test segment into the stroke's creation-space
-            return segmentHitsStroke(s, x1 - o.dx, y1 - o.dy, x2 - o.dx, y2 - o.dy, r);
+            return o ? segmentHitsStroke(s, x1 - o.dx, y1 - o.dy, x2 - o.dx, y2 - o.dy, r) : false;
         });
         if (removed.length > 0) {
             this.eraseHitSomething = true;

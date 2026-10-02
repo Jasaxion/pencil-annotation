@@ -11,6 +11,7 @@ export function strokesToPngBlob(
     bg: "white" | "transparent",
     offsets?: OffsetFn,
 ): Promise<Blob> {
+    if (offsets && store.strokes.some(s => offsets(s) === null)) return Promise.reject(new Error("Some ink anchors are not loaded; open their blocks before exporting PNG"));
     const bbox = store.contentBBox(offsets);
     if (!bbox) return Promise.reject(new Error("empty"));
     const pad = 12;

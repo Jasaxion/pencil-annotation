@@ -110,6 +110,57 @@ try {
             Object.entries(routing).forEach(([key, value]) => assert(value, key));
             console.log(`${name}: pen/finger isolation and mode-off activation passed`);
 
+            await open();
+            const auxiliaryControls = await page.evaluate(() => {
+                const h = window.harness, root = h.fakeProtyle.element;
+                h.settings.doubleTapToggle = false;
+                const table = document.createElement("div"); table.className = "protyle-table-control";
+                table.innerHTML = ["add-row", "add-column", "add-both", "row", "column", "cell"].map(type => `<button data-type="${type}"><span>${type}</span></button>`).join("");
+                const gutter = document.createElement("div"); gutter.className = "protyle-gutters";
+                gutter.innerHTML = '<button><svg><use href="#test-icon"></use></svg></button>';
+                root.append(table, gutter);
+                const counts = {down: 0, move: 0, click: 0, context: 0};
+                for (const el of [table, gutter]) {
+                    el.addEventListener("pointerdown", () => counts.down++); el.addEventListener("pointermove", () => counts.move++);
+                    el.addEventListener("click", () => counts.click++); el.addEventListener("contextmenu", () => counts.context++);
+                }
+                let id = 800;
+                for (const target of [...table.querySelectorAll("span"), gutter.querySelector("use")]) {
+                    h.fire(target, "pointerdown", 50, 50, {pointerId: ++id});
+                    h.fire(target, "pointermove", 60, 60, {pointerId: id}); h.fire(target, "pointerup", 60, 60, {pointerId: id});
+                    target.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true, detail: 0}));
+                    target.dispatchEvent(new PointerEvent("contextmenu", {bubbles: true, cancelable: true, pointerType: "pen", button: 2}));
+                }
+                const isolated = Object.values(counts).every(n => n === 0) && h.strokesCount() === 0 && h.overlay.ownedPointers.size === 0;
+                const target = table.querySelector("span");
+                for (const drawing of [false, true]) {
+                    h.settings.mouseDrawing = drawing;
+                    h.fire(target, "pointerdown", 50, 50, {pointerId: 1, pointerType: "mouse"}); h.fire(target, "pointerup", 50, 50, {pointerId: 1, pointerType: "mouse"});
+                    target.dispatchEvent(new PointerEvent("click", {bubbles: true, cancelable: true, pointerType: "mouse", pointerId: 1, detail: 1}));
+                }
+                const nativeMouse = counts.down === 2 && counts.click === 2 && h.strokesCount() === 0;
+                window.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter"})); target.click();
+                const keyboard = counts.click === 3;
+                h.settings.mouseDrawing = false;
+                const start = h.toClient(100, 280);
+                h.fire(h.captureEl(), "pointerdown", start.x, start.y, {pointerId: ++id});
+                h.fire(target, "pointermove", start.x + 30, start.y + 10, {pointerId: id});
+                h.fire(target, "pointerup", start.x + 40, start.y + 20, {pointerId: id, pressure: 0});
+                const continuous = h.strokesCount() === 1 && Math.abs(h.projectedEnd(h.overlay.store.strokes[0]).x - 140) < .01;
+                h.overlay.setMode(false); h.fire(target, "pointerdown", 50, 50, {pointerId: ++id}); h.fire(target, "pointerup", 50, 50, {pointerId: id});
+                target.dispatchEvent(new PointerEvent("click", {bubbles: true, cancelable: true, pointerType: "pen", detail: 1}));
+                const modeOff = counts.down === 3 && counts.click === 4;
+                h.overlay.setMode(true);
+                const nested = document.createElement("div"); nested.className = "protyle"; nested.innerHTML = '<div class="protyle-gutters"><button>Nested</button></div>';
+                h.wysiwygEl.append(nested); let nestedDown = 0; nested.addEventListener("pointerdown", () => nestedDown++);
+                h.fire(nested.querySelector("button"), "pointerdown", 60, 60, {pointerId: ++id});
+                const ownedOnly = nestedDown === 1;
+                table.remove(); gutter.remove(); nested.remove();
+                return {isolated, nativeMouse, keyboard, continuous, modeOff, ownedOnly};
+            });
+            Object.entries(auxiliaryControls).forEach(([key, value]) => assert(value, key));
+            console.log(`${name}: pen-only isolation for table/gutter controls, native mouse/keyboard and continuous strokes passed`);
+
             if (name === "chromium") {
                 await open();
                 await page.evaluate(() => { window.harness.palette.setMode(false); window.harness.settings.doubleTapToggle = false; });
@@ -157,7 +208,7 @@ try {
                     h.stroke([[150, 200, .7], [150 + dx, 200 + dy]]);
                     const stroke = h.overlay.store.strokes[0];
                     if (!stroke) return false;
-                    const end = stroke.points.at(-1);
+                    const end = h.projectedEnd(stroke);
                     const before = pixels(); h.overlay.redrawAll();
                     return end.x === 150 + dx && end.y === 200 + dy && Math.abs(end.p - .7) < 0.00001 && before === pixels();
                 });
@@ -173,7 +224,7 @@ try {
                 h.fire(el, "pointerup", p.x + 40, p.y + 40, {pointerId: 61, pressure: 0});
                 const stroke = h.overlay.store.strokes[0];
                 h.config.tool = "pen";
-                return {shortStrokes, stillLive, continuous: h.strokesCount() === 1 && stroke.points.at(-1).x === 160,
+                return {shortStrokes, stillLive, continuous: h.strokesCount() === 1 && h.projectedEnd(stroke).x === 160,
                     frozenConfig: stroke.tool === "pen"};
             });
             Object.entries(continuity).forEach(([key, value]) => assert(value, key));
@@ -378,7 +429,7 @@ try {
                 const rect = target.getBoundingClientRect();
                 h.fire(target, "pointerdown", rect.x + 100, rect.y + 200, {pointerId: 103});
                 h.fire(target, "pointerup", rect.x + 130, rect.y + 220, {pointerId: 103, pressure: 0});
-                return policy && h.strokesCount() === 1 && h.overlay.store.strokes[0].points.at(-1).x === 130;
+                return policy && h.strokesCount() === 1 && h.projectedEnd(h.overlay.store.strokes[0]).x === 130;
             });
             assert(replacement, "replaced editor content must retain input policy and sampling");
 
@@ -444,6 +495,35 @@ try {
             console.log(`${name}: interrupted selection/eraser undo and optional double-tap passed`);
 
             await open();
+            const coordinateMigration = await page.evaluate(() => {
+                const h = window.harness, block = h.wysiwygEl.querySelector("[data-node-id]");
+                const w = h.wysiwygEl.getBoundingClientRect(), b = block.getBoundingClientRect();
+                const x = b.left - w.left, y = b.top - w.top;
+                const stroke = (id, origin) => ({i: id, t: 0, c: "#000000", w: 4, o: 1, s: 0, a: 1,
+                    b: [block.dataset.nodeId, x, origin], p: [x + 20, origin + 20, .5, x + 40, origin + 20, .5]});
+                h.overlay.store.adoptPayload({version: 1, docId: h.overlay.docId, updatedAt: 1,
+                    strokes: [stroke("cache-a", y - 100), stroke("cache-b", y)]});
+                const samePosition = h.overlay.store.strokes.every(s => Math.abs(h.projectedEnd(s).y - y - 20) < .01);
+                const revisions = h.overlay.store.strokes.map(s => s.revision).join(",");
+                block.style.marginTop = "100px";
+                const moved = block.getBoundingClientRect(), base = h.wysiwygEl.getBoundingClientRect();
+                h.config.tool = "select";
+                h.fire(block, "pointerdown", moved.left + 20, moved.top + 20, {pointerId: 150});
+                h.fire(block, "pointerup", moved.left + 20, moved.top + 20, {pointerId: 150, pressure: 0});
+                const followsBlock = h.overlay.store.strokes.every(s => Math.abs(h.projectedEnd(s).y - (moved.top - base.top + 20)) < .01);
+                const tapIsReadOnly = !h.overlay.store.dirty && !h.overlay.store.canUndo && revisions === h.overlay.store.strokes.map(s => s.revision).join(",");
+                h.fire(block, "pointerdown", moved.left + 20, moved.top + 20, {pointerId: 151});
+                h.fire(block, "pointermove", moved.left + 35, moved.top + 25, {pointerId: 151});
+                h.overlay.store.block("integrity", "test hard refresh failure");
+                h.overlay.refreshFromStore();
+                h.fire(block, "pointerup", moved.left + 40, moved.top + 25, {pointerId: 151, pressure: 0});
+                const preserved = h.overlay.store.strokes.length === 2 && h.overlay.store.serialize().snapshot.values.length === 1;
+                return {samePosition, followsBlock, tapIsReadOnly, errorDuringDragPreserved: preserved};
+            });
+            Object.entries(coordinateMigration).forEach(([key, value]) => assert(value, key));
+            console.log(`${name}: mixed legacy anchor origins and zero-motion selection stay consistent`);
+
+            await open();
             const clipping = await page.evaluate(async () => {
                 const h = window.harness;
                 h.settings.doubleTapToggle = false;
@@ -488,17 +568,28 @@ try {
                 h.overlay.destroy();
                 h.palette.toolbar.remove(); h.palette.handle.remove();
                 const calls = [];
-                let disk = null, failLoad = false;
+                const files = new Map();
+                let failLoad = false, fileReads = 0;
                 const originalFetch = window.fetch;
                 window.fetch = async (url, options) => {
-                    if (String(url).endsWith("getFile")) {
-                        if (failLoad) throw new Error("offline");
-                        return disk ? Response.json(disk) : new Response("", {status: 404});
+                    const endpoint = String(url);
+                    if (endpoint.endsWith("getDocInfo")) { const id = JSON.parse(options.body).id; return Response.json({code: 0, data: {id, rootID: id}}); }
+                    if (endpoint.endsWith("readDir")) {
+                        const path = JSON.parse(options.body).path + "/";
+                        return Response.json({code: 0, data: [...files.keys()].filter(k => k.startsWith(path)).map(k => ({name: k.slice(path.length), isDir: false}))});
                     }
-                    if (String(url).endsWith("putFile")) {
-                        const payload = JSON.parse(await options.body.get("file").text());
+                    if (endpoint.endsWith("getFile")) {
+                        fileReads++;
+                        if (failLoad) throw new Error("offline");
+                        const path = JSON.parse(options.body).path;
+                        return files.has(path) ? Response.json(files.get(path)) : new Response("", {status: 404});
+                    }
+                    if (endpoint.endsWith("removeFile")) { files.delete(JSON.parse(options.body).path); return Response.json({code: 0}); }
+                    if (endpoint.endsWith("putFile")) {
+                        const path = options.body.get("path"), payload = JSON.parse(await options.body.get("file").text());
+                        if (path.includes("/base-")) { files.set(path, payload); return Response.json({code: 0}); }
                         return new Promise(resolve => calls.push({payload, finish(ok = true) {
-                            if (ok) disk = payload;
+                            if (ok) files.set(path, payload);
                             resolve(Response.json({code: ok ? 0 : -1, msg: "test write failure"}));
                         }}));
                     }
@@ -514,6 +605,16 @@ try {
                 p.attachProtyle(h.fakeProtyle);
                 const o = p.overlays.get(h.fakeProtyle.element);
                 await until(() => o.store.loaded);
+                const stored = async () => {
+                    const store = new o.store.constructor(o.docId);
+                    store.adoptPayload(await h.loadPayload(p, o.docId));
+                    return store;
+                };
+                const storeForeign = store => {
+                    const pub = store.serialize();
+                    const path = `/data/storage/petal/pencil-annotation/sync-v2/${o.docId}/${pub.snapshot.writer}-${pub.snapshot.sequence}.json`;
+                    files.set(path, structuredClone(pub.snapshot)); store.acknowledge(pub.snapshot.sequence); return path;
+                };
                 const add = () => { o.store.addStroke("pen", {color: "#000", width: 4, opacity: 1, simulate: false}, [{x: 1, y: 2, p: .5}]); p.scheduleSave(o); };
                 add();
                 const first = p.flushAll();
@@ -527,7 +628,7 @@ try {
                 await until(() => calls.length === 2);
                 calls[1].finish();
                 await Promise.all([first, second]);
-                const newestSaved = disk.strokes.length === 2 && !o.store.dirty;
+                const newestSaved = (await stored()).strokes.length === 2 && !o.store.dirty;
                 add();
                 p.detachProtyle(h.fakeProtyle);
                 await until(() => calls.length === 3);
@@ -539,14 +640,18 @@ try {
                 const retry = p.flushAll();
                 await until(() => calls.length === 4);
                 calls[3].finish(); await retry;
-                const retrySaved = disk.strokes.length === 3;
+                const retrySaved = (await stored()).strokes.length === 3;
+                const foreign = await stored();
                 p.detachProtyle(h.fakeProtyle);
                 const cleanEvicted = !p.documents.has(o.docId);
-                disk = {...disk, strokes: [...disk.strokes, {...disk.strokes[0], i: "remote-addition"}]};
+                const readsBeforeReopen = fileReads;
+                foreign.addStroke("pen", {color: "#000", width: 4, opacity: 1, simulate: false}, [{x: 20, y: 20, p: .5}]);
+                storeForeign(foreign);
                 p.attachProtyle(h.fakeProtyle);
                 const reopened = p.overlays.get(h.fakeProtyle.element);
                 await until(() => reopened.store.loaded);
                 const freshBaseline = reopened.store !== o.store && reopened.store.strokes.length === 4;
+                const cacheEvicted = fileReads - readsBeforeReopen >= 4;
                 const secondElement = h.fakeProtyle.element.cloneNode(true);
                 secondElement.querySelectorAll(".pa-overlay").forEach(el => el.remove());
                 document.getElementById("app").append(secondElement);
@@ -558,18 +663,36 @@ try {
                 let repaints = 0;
                 const redraw = secondView.redrawAll.bind(secondView);
                 secondView.redrawAll = () => { repaints++; redraw(); };
-                disk = {...disk, strokes: [...disk.strokes, {...disk.strokes[0], i: "remote-second-view"}]};
+                foreign.addStroke("pen", {color: "#000", width: 4, opacity: 1, simulate: false}, [{x: 30, y: 30, p: .5}]);
+                const foreignPath = storeForeign(foreign);
                 await p.onDataChanged("sync");
+                await h.sleep(30);
                 const syncRepaint = secondView.store === reopened.store && secondView.store.strokes.length === 5 && repaints > 0;
                 p.detachProtyle(secondProtyle); secondElement.remove();
                 failLoad = true;
                 let readFailed = false;
                 try { await h.loadPayload(p, o.docId); } catch { readFailed = true; }
                 failLoad = false;
-                const savedDisk = disk; disk = {version: 1, docId: o.docId, updatedAt: 1, strokes: [{}]};
+                const malformed = structuredClone(files.get(foreignPath));
+                malformed.sequence++; malformed.values[0].stroke.p[2] = 99;
+                const badPath = foreignPath.replace(/-\d+\.json$/, `-${malformed.sequence}.json`);
+                files.set(badPath, malformed);
                 let malformedRejected = false;
                 try { await h.loadPayload(p, o.docId); } catch { malformedRejected = true; }
-                disk = savedDisk;
+                files.delete(badPath);
+                let stickyIntegrity = false;
+                try { await h.loadPayload(p, o.docId, false); } catch { stickyIntegrity = true; }
+                await h.loadPayload(p, o.docId, true);
+                const legacyPath = `/data/storage/petal/pencil-annotation/${o.docId}.json`;
+                files.set(legacyPath, {version: 1, docId: o.docId, updatedAt: 123, strokes: []});
+                await p.onDataChanged("sync");
+                await p.onDataChanged("overwrite", false);
+                const legacyBlocked = !reopened.store.canEdit && p.syncErrors.has(o.docId);
+                let writeBlocked = false;
+                const attempted = structuredClone(files.get(foreignPath)); attempted.sequence += 100;
+                try { await h.savePayload(p, {bases: foreign.backup().payload.bases, snapshot: attempted}); } catch { writeBlocked = true; }
+                await p.reconcileLegacy(reopened);
+                const recovered = reopened.store.canEdit && files.has(legacyPath);
                 reopened.setMode(true);
                 reopened.store.addStroke("pen", {color: "#000", width: 4, opacity: 1, simulate: false}, [{x: 1, y: 2, p: .5}]);
                 p.scheduleSave(reopened);
@@ -581,9 +704,9 @@ try {
                 h.fire(h.captureEl(), "pointermove", point.x + 30, point.y + 20, {pointerId: 88});
                 h.fire(h.captureEl(), "pointerup", point.x + 50, point.y + 20, {pointerId: 88});
                 calls[4].finish(); await unload;
-                const unloadSafe = disk.strokes.length === 6 && !reopened.store.dirty;
+                const unloadSafe = (await stored()).strokes.length === 6 && !reopened.store.dirty;
                 window.fetch = originalFetch;
-                return {serialized, newestSaved, retained, shared, retrySaved, cleanEvicted, freshBaseline, syncRepaint, readFailed, malformedRejected, unloadSafe};
+                return {serialized, newestSaved, retained, shared, retrySaved, cleanEvicted, cacheEvicted, freshBaseline, syncRepaint, readFailed, malformedRejected, stickyIntegrity, legacyBlocked, writeBlocked, recovered, unloadSafe};
             });
             Object.entries(persistence).forEach(([key, value]) => assert(value, key));
             console.log(`${name}: serialized writes, detached retry, shared stores, read-error safety passed`);

@@ -24,6 +24,7 @@ export interface PaletteState {
     canUndo: boolean;
     canRedo: boolean;
     hasSelection: boolean;
+    warning: string;
 }
 
 export interface PaletteDeps {
@@ -78,7 +79,7 @@ export class Palette {
     readonly handle: HTMLButtonElement;
 
     private readonly deps: PaletteDeps;
-    private state: PaletteState = {mode: false, canUndo: false, canRedo: false, hasSelection: false};
+    private state: PaletteState = {mode: false, canUndo: false, canRedo: false, hasSelection: false, warning: ""};
     private suppressClick = false;
     private stopDrag: (() => void) | null = null;
     private showHandle = true;
@@ -339,6 +340,11 @@ export class Palette {
         const tool = cfg.tool;
 
         this.toolbar.innerHTML = "";
+        if (this.state.warning) {
+            const warning = this.btn("", this.state.warning, () => this.deps.onAction("export"), "pa-sync-warning");
+            warning.textContent = t("syncPaused");
+            this.toolbar.append(warning);
+        }
 
         // tool buttons
         const toolsGroup = document.createElement("div");
@@ -464,7 +470,7 @@ export class Palette {
         const structural =
             prev.canUndo !== this.state.canUndo ||
             prev.canRedo !== this.state.canRedo ||
-            prev.hasSelection !== this.state.hasSelection;
+            prev.hasSelection !== this.state.hasSelection || prev.warning !== this.state.warning;
         if (structural) this.renderToolbar();
         this.handle.classList.toggle("pa-handle--on", this.state.mode);
     }

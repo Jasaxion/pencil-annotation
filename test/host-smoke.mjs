@@ -1,11 +1,12 @@
 // Optional real-host integration: never opens or modifies an existing workspace.
 import assert from "node:assert/strict";
-import {mkdtemp, mkdir, cp, readFile, rm} from "node:fs/promises";
+import {mkdtemp, mkdir, cp, readFile, writeFile, readdir, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join, dirname, resolve} from "node:path";
 import {spawn} from "node:child_process";
 import {once} from "node:events";
 import net from "node:net";
+import {randomBytes} from "node:crypto";
 import {chromium, webkit} from "playwright";
 
 const kernel = process.env.SIYUAN_KERNEL;
@@ -16,7 +17,7 @@ await cp(resolve("build"), join(workspace, "data/plugins/pencil-annotation"), {r
 const socket = net.createServer(); socket.listen(0, "127.0.0.1"); await once(socket, "listening");
 const port = socket.address().port; await new Promise(r => socket.close(r));
 const base = `http://127.0.0.1:${port}`;
-const authCode = `pencil-test-${port}`;
+const authCode = randomBytes(24).toString('hex');
 const child = spawn(kernel, ["serve", `--workspace=${workspace}`, `--port=${port}`, `--accessAuthCode=${authCode}`, "--lang=en",
     `--wd=${dirname(dirname(kernel))}`], {stdio: ["ignore", "pipe", "pipe"]});
 let logs = "";
@@ -39,6 +40,9 @@ try {
             await new Promise(r => setTimeout(r, 100));
         }
     }
+    const hostVersion = JSON.parse(await readFile(join(workspace, "conf/conf.json"), "utf8")).system.kernelVersion;
+    const opensWelcomeEditor = /^3\.[0-7]\./.test(hostVersion);
+    console.log(`Host integration version: ${hostVersion}`);
     await api("/api/system/setDownloadInstallPkg", {downloadInstallPkg: false});
     await api("/api/setting/setBazaar", {trust: true, petalDisabled: false});
     await api("/api/petal/setPetalEnabled", {packageName: "pencil-annotation", enabled: true});
@@ -46,6 +50,21 @@ try {
     const doc = await api("/api/filetree/createDocWithMd", {notebook, path: "/Pen regression", markdown:
         "- [ ] Do not toggle with pen\n\n| Column | Value |\n| --- | --- |\n| Drag with mouse | Test |\n\n" +
         Array.from({length: 30}, (_, i) => `Paragraph ${i}: native scrolling and persistent handwriting.`).join("\n\n")});
+    const showMobileDocuments = async page => {
+        const notebookRow = page.locator('[data-type="navigation-root"]').filter({hasText: 'Pencil regression'}).first();
+        await notebookRow.waitFor({state: 'attached'});
+        const visible = await notebookRow.evaluate(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.left >= 0 && r.left < innerWidth; });
+        if (!visible) await page.locator('#toolbarFile').click();
+        await page.waitForFunction(() => [...document.querySelectorAll('[data-type="navigation-root"]')].some(el => {
+            const r = el.getBoundingClientRect(); return el.textContent.includes('Pencil regression') && r.width > 0 && r.left >= 0 && r.left < innerWidth;
+        }));
+    };
+    const legacyFile = join(workspace, `data/storage/petal/pencil-annotation/${doc}.json`);
+    await mkdir(join(workspace, "data/storage/petal/pencil-annotation"), {recursive: true});
+    const legacyBytes = JSON.stringify({version: 1, docId: doc, updatedAt: 1, strokes: [
+        {i: "legacy-seed", t: 0, c: "#334455", w: 4, o: 1, s: 0, a: 1, p: [120, 90, .5, 145, 100, .6]},
+    ]});
+    await writeFile(legacyFile, legacyBytes);
     for (const [name, mobile] of [["chromium", false], ["chromium", true], ["webkit", true]]) {
         const browser = await ({chromium, webkit}[name]).launch(name === "chromium" ? {channel: "chromium"} : {});
         try {
@@ -63,11 +82,11 @@ try {
                 await page.waitForSelector("#loading", {state: "hidden"});
                 await page.waitForSelector(".pa-handle");
                 // The fresh-workspace guide opens asynchronously after plugin initialization.
-                if (!mobile) await page.locator(".protyle-wysiwyg:visible").first().waitFor();
-                // Mobile opens its document tree from the top-left menu.
-                if (mobile) await page.mouse.click(24, 24);
-                const note = page.getByText("Pen regression", {exact: true}).first();
-                if (!await note.count()) {
+                if (!mobile && opensWelcomeEditor) await page.locator(".protyle-wysiwyg:visible").first().waitFor();
+                // SiYuan 3.8 moved Documents into the bottom bar; use its stable control ID.
+                if (mobile) await showMobileDocuments(page);
+                const note = page.locator(`[data-type="navigation-file"][data-node-id="${doc}"] .b3-list-item__text`).first();
+                if (!await note.isVisible()) {
                     if (mobile) await page.getByText("Pencil regression", {exact: true}).click();
                     else await page.getByText("Pencil regression", {exact: true}).dblclick();
                 }
@@ -81,9 +100,32 @@ try {
             const task = page.locator('[data-type="NodeListItem"][data-subtype="t"]:visible').first();
             const taskBefore = await task.getAttribute("data-task");
             const target = task.locator(".protyle-action").first();
+            // The 3.8 mobile sidebar slides the editor itself; wait for actionability,
+            // not merely a mounted/loaded store, before measuring pen coordinates.
+            await target.click({trial: true});
             const rect = await target.boundingBox();
             if (name === "chromium") {
                 const cdp = await context.newCDPSession(page);
+                if (!mobile) {
+                    const table = page.locator('.protyle-wysiwyg:visible table').first();
+                    const edge = await table.evaluate(table => {
+                        const rect = table.getBoundingClientRect(), wrapper = table.parentElement.getBoundingClientRect();
+                        return {x: rect.left + rect.width / 2, y: Math.max(rect.bottom, wrapper.bottom) + 1};
+                    });
+                    await page.mouse.move(edge.x, edge.y);
+                    const addRow = page.locator('.protyle-table-control:visible [data-type="add-row"]').first();
+                    await addRow.waitFor();
+                    const control = await addRow.boundingBox(), rows = await table.locator('tr').count();
+                    const cx = control.x + control.width / 2, cy = control.y + control.height / 2;
+                    await cdp.send('Input.dispatchMouseEvent', {type: 'mousePressed', pointerType: 'pen', button: 'left', buttons: 1, clickCount: 1, x: cx, y: cy, force: .5});
+                    await cdp.send('Input.dispatchMouseEvent', {type: 'mouseReleased', pointerType: 'pen', button: 'left', buttons: 0, clickCount: 1, x: cx, y: cy});
+                    assert.equal(await table.locator('tr').count(), rows, 'pen must not add a table row through sibling controls');
+                    assert.equal(await count(), before, 'auxiliary controls are not drawing surfaces');
+                    await page.mouse.move(edge.x, edge.y);
+                    await addRow.click();
+                    await page.waitForFunction(rows => document.querySelector('.protyle-wysiwyg table')?.rows.length === rows + 1, rows);
+                    console.log('SiYuan chromium: trusted pen table-control suppression and immediate real-mouse row insertion passed');
+                }
                 const x = rect.x + 10, y = rect.y + 10;
                 const palmScroll = await page.evaluate(id => Array.from(window.siyuan.ws.app.plugins[0].overlays.values()).find(o => o.docId === id).protyle.contentElement.scrollTop, doc);
                 await cdp.send("Input.dispatchMouseEvent", {type: "mousePressed", pointerType: "pen", button: "left", buttons: 1, clickCount: 1, x, y, force: .5});
@@ -99,10 +141,10 @@ try {
                 const strokeEnd = await page.evaluate(id => {
                     const o = Array.from(window.siyuan.ws.app.plugins[0].overlays.values()).find(o => o.docId === id);
                     const rect = o.protyle.wysiwyg.element.getBoundingClientRect();
-                    const point = o.store.strokes.at(-1).points.at(-1);
-                    return {x: point.x + rect.x, y: point.y + rect.y, scroll: o.protyle.contentElement.scrollTop};
+                    const stroke = o.store.strokes.at(-1), point = stroke.points.at(-1), offset = o.strokeOffsets()(stroke);
+                    return {x: point.x + offset.dx + rect.x, y: point.y + offset.dy + rect.y, scroll: o.protyle.contentElement.scrollTop};
                 }, doc);
-                assert(Math.abs(strokeEnd.x - x - 30) < 1 && Math.abs(strokeEnd.y - y - 36) < 1, "full pen endpoint must survive concurrent touch");
+                assert(Math.abs(strokeEnd.x - x - 30) < 1 && Math.abs(strokeEnd.y - y - 36) < 1, `full pen endpoint must survive concurrent touch: ${JSON.stringify({expected: {x: x + 30, y: y + 36}, actual: strokeEnd})}`);
                 assert.equal(strokeEnd.scroll, palmScroll, "palm must not pan during pen contact");
                 if (mobile) {
                     const scrollBefore = await page.evaluate(id => Array.from(window.siyuan.ws.app.plugins[0].overlays.values()).find(o => o.docId === id).protyle.contentElement.scrollTop, doc);
@@ -130,8 +172,11 @@ try {
                 return o.store.strokes.length > 0 && !o.store.dirty && !o.store.saving;
             }, doc);
             assert.equal(await count(), before + 1);
-            const disk = JSON.parse(await readFile(join(workspace, `data/storage/petal/pencil-annotation/${doc}.json`), "utf8"));
-            assert.equal(disk.strokes.length, before + 1);
+            const syncPath = join(workspace, `data/storage/petal/pencil-annotation/sync-v2/${doc}`);
+            const snapshots = (await readdir(syncPath)).filter(name => /^w[0-9a-f]+-\d+\.json$/.test(name));
+            assert(snapshots.length > 0, "versioned ink snapshots must be durable");
+            const saved = await Promise.all(snapshots.map(async file => JSON.parse(await readFile(join(syncPath, file), "utf8"))));
+            assert(saved.some(snapshot => snapshot.values.length > 0));
             await open();
             assert.equal(await count(), before + 1, "reload must recover all saved ink");
             await page.locator(".pa-handle").click();
@@ -154,6 +199,245 @@ try {
             throw error;
         } finally { await browser.close(); }
     }
+
+    const openFixture = async (page, id, title, mobile = false) => {
+        await page.goto(base + (mobile ? "/stage/build/mobile/" : "/"));
+        await page.waitForSelector("#loading", {state: "hidden"});
+        await page.waitForSelector(".pa-handle");
+        if (!mobile && opensWelcomeEditor) await page.locator(".protyle-wysiwyg:visible").first().waitFor();
+        if (mobile) await showMobileDocuments(page);
+        const item = page.locator(`[data-type="navigation-file"][data-node-id="${id}"] .b3-list-item__text`).first();
+        if (!await item.isVisible()) {
+            if (mobile) await page.getByText("Pencil regression", {exact: true}).click();
+            else await page.getByText("Pencil regression", {exact: true}).dblclick();
+        }
+        await item.click();
+        await page.waitForFunction(id => [...window.siyuan.ws.app.plugins.find(p => p.name === "pencil-annotation").overlays.values()].some(o => o.docId === id && o.store.loaded), id);
+        await page.evaluate(id => {
+            const plugin = window.siyuan.ws.app.plugins.find(p => p.name === "pencil-annotation");
+            const overlay = [...plugin.overlays.values()].find(o => o.docId === id);
+            clearInterval(plugin.syncPoll); plugin.armSave = () => {};
+            window.inkFixture = {plugin, overlay};
+        }, id);
+    };
+    const concurrentBrowser = await chromium.launch({channel: "chromium"});
+    try {
+        const newPage = async () => {
+            const context = await concurrentBrowser.newContext({viewport: {width: 1100, height: 800}});
+            await context.request.post(base + "/api/system/loginAuth", {data: {authCode}});
+            const page = await context.newPage(); await openFixture(page, doc, "Pen regression"); return page;
+        };
+        const a = await newPage(), b = await newPage();
+        // Both edits are prepared before either write starts: genuinely concurrent ancestry.
+        await Promise.all([a, b].map((page, i) => page.evaluate(dx => {
+            const {plugin, overlay} = window.inkFixture;
+            overlay.store.moveStrokes([overlay.store.strokes.find(s => s.logicalId === "legacy-seed")], dx, 0);
+            plugin.scheduleSave(overlay);
+        }, i ? -20 : 20)));
+        await Promise.all([a, b].map(page => page.evaluate(() => window.inkFixture.plugin.flushAll())));
+        await a.context().close(); await b.context().close();
+        const c = await newPage();
+        assert.equal(await c.evaluate(() => window.inkFixture.overlay.store.strokes.filter(s => s.logicalId === "legacy-seed").length), 2);
+        await c.evaluate(async () => {
+            const {plugin, overlay} = window.inkFixture;
+            const copy = overlay.store.strokes.find(s => s.logicalId === "legacy-seed");
+            overlay.store.eraseWhere(s => s.revision === copy.revision); plugin.scheduleSave(overlay); await plugin.flushAll();
+        });
+        await c.context().close();
+        const d = await newPage(), e = await newPage();
+        assert.equal(await d.evaluate(() => window.inkFixture.overlay.store.strokes.filter(s => s.logicalId === "legacy-seed").length), 1);
+        await d.evaluate(() => { const f = window.inkFixture; f.overlay.store.clearAll(); f.plugin.scheduleSave(f.overlay); });
+        await e.evaluate(() => { const f = window.inkFixture; f.overlay.store.addStroke("pen", {color: "#123456", width: 4, opacity: 1, simulate: false}, [{x: 50, y: 50, p: .5}]); f.plugin.scheduleSave(f.overlay); });
+        await Promise.all([d, e].map(page => page.evaluate(() => window.inkFixture.plugin.flushAll())));
+        await d.context().close(); await e.context().close();
+        const f = await newPage();
+        assert.equal(await f.evaluate(() => window.inkFixture.overlay.store.strokes.length), 1, "clear must not remove an unseen concurrent addition");
+        for (let i = 0; i < 4; i++) await f.evaluate(async () => {
+            const x = window.inkFixture;
+            x.overlay.store.addStroke("pen", {color: "#123456", width: 4, opacity: 1, simulate: false}, [{x: 70, y: 70, p: .5}]);
+            x.plugin.scheduleSave(x.overlay); await x.plugin.flushAll();
+        });
+        const writer = await f.evaluate(() => window.inkFixture.overlay.store.writer);
+        const names = await readdir(join(workspace, `data/storage/petal/pencil-annotation/sync-v2/${doc}`));
+        assert.equal(names.filter(name => name.startsWith(`${writer}-`)).length, 2, "keep the latest two verified cumulative writer files");
+        assert.equal(await readFile(legacyFile, "utf8"), legacyBytes, "legacy ink backup must remain untouched");
+        await writeFile(legacyFile, JSON.stringify({...JSON.parse(legacyBytes), updatedAt: 999}));
+        await f.evaluate(async () => { await window.inkFixture.plugin.onDataChanged("sync"); await window.inkFixture.plugin.onDataChanged("overwrite", false); });
+        assert.equal(await f.evaluate(() => window.inkFixture.overlay.store.canEdit), false);
+        await f.evaluate(() => window.inkFixture.plugin.reconcileLegacy(window.inkFixture.overlay));
+        assert.equal(await f.evaluate(() => window.inkFixture.overlay.store.canEdit), true);
+        assert.equal(await f.evaluate(() => window.inkFixture.overlay.store.strokes.length), 5, "legacy reconciliation must not resurrect retired unchanged ink");
+        assert.equal(JSON.parse(await readFile(legacyFile, "utf8")).updatedAt, 999, "reconciliation must not overwrite the old file");
+        console.log("SiYuan multi-browser: concurrent moves, selective conflict deletion, clear/add, restart, snapshot pruning and legacy barrier passed");
+    } finally { await concurrentBrowser.close(); }
+
+    const pdfDoc = await api("/api/filetree/createDocWithMd", {notebook, path: "/Complete PDF fixture", markdown:
+        "# PDF folded heading\n\nHidden PDF child\n\nInline math $x^2$\n\n" + Array.from({length: 160}, (_, i) => `Full PDF paragraph ${i}${i === 159 ? " FINAL_PDF_SENTINEL" : ""}`).join("\n\n")});
+    let heading, last;
+    for (let i = 0; i < 100; i++) {
+        const blocks = await api("/api/query/sql", {stmt: `select id,type,content from blocks where root_id='${pdfDoc}' and (content='PDF folded heading' or content like '%FINAL_PDF_SENTINEL%')`});
+        heading = blocks.find(b => b.type === "h")?.id; last = blocks.find(b => b.type === "p")?.id;
+        if (heading && last) break;
+        await new Promise(r => setTimeout(r, 50));
+    }
+    assert(heading && last); await api("/api/attr/setBlockAttrs", {id: heading, attrs: {fold: "1"}});
+    for (const [name, mobile] of [["chromium", false], ["webkit", true]]) {
+        const browser = await ({chromium, webkit}[name]).launch(name === "chromium" ? {channel: "chromium"} : {});
+        try {
+            const context = await browser.newContext({viewport: mobile ? {width: 390, height: 844} : {width: 1100, height: 800}, isMobile: mobile, hasTouch: mobile, acceptDownloads: true});
+            await context.request.post(base + "/api/system/loginAuth", {data: {authCode}});
+            const page = await context.newPage(); await openFixture(page, pdfDoc, "Complete PDF fixture", mobile);
+            await page.evaluate(async last => {
+                const {plugin, overlay} = window.inkFixture;
+                overlay.store.addStroke("pen", {color: "#ff0000", width: 5, opacity: 1, simulate: false}, [{x: 30, y: 10, p: .7}, {x: 100, y: 12, p: .7}],
+                    {blockId: last, ox: 0, oy: 0}, [30, 8000]);
+                plugin.scheduleSave(overlay); await plugin.flushAll();
+                window.pdfRasterStats = [];
+                const original = HTMLCanvasElement.prototype.toDataURL;
+                HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
+                    if (type === "image/jpeg" && quality === .94) {
+                        const bytes = this.getContext("2d").getImageData(0, 0, this.width, this.height).data;
+                        let red = 0; for (let i = 0; i < bytes.length; i += 4) if (bytes[i] > 180 && bytes[i+1] < 90 && bytes[i+2] < 90) red++;
+                        window.pdfRasterStats.push({red, width: this.width, height: this.height});
+                    }
+                    return original.call(this, type, quality);
+                };
+            }, last);
+            await page.locator(".pa-handle").click();
+            await page.getByRole("button", {name: "Export note and handwriting", exact: true}).click();
+            await page.locator('[data-action="pdf"]').click();
+            await page.waitForFunction(() => /failed|ready/.test(document.querySelector(".pa-export__status")?.textContent || ""), {}, {timeout: 90000});
+            const status = await page.locator(".pa-export__status").innerText(); assert.match(status, /PDF ready/, status);
+            const raster = await page.evaluate(() => window.pdfRasterStats);
+            assert(raster.length > 1 && raster.at(-1).red > 0, "hidden last-block ink must appear on the last exported page");
+            const downloadPromise = page.waitForEvent("download"); await page.locator('[data-action="download"]').click();
+            const download = await downloadPromise; const bytes = await readFile(await download.path());
+            assert.equal(bytes.subarray(0, 4).toString(), "%PDF");
+            assert.equal(Number(/\/Count\s+(\d+)/.exec(bytes.toString("latin1"))[1]), raster.length);
+            if (process.env.PENCIL_ARTIFACT_DIR) {
+                await download.saveAs(join(process.env.PENCIL_ARTIFACT_DIR, `${name}-full-note.pdf`));
+                await page.screenshot({path: join(process.env.PENCIL_ARTIFACT_DIR, `${name}-pdf-dialog.png`)});
+            }
+            console.log(`SiYuan ${name}: folded/unloaded full document + math + last-block ink PDF, browser download passed (${raster.length} pages)`);
+        } catch (error) {
+            for (const context of browser.contexts()) for (const page of context.pages()) {
+                await page.screenshot({path: `/tmp/pencil-full-pdf-failure-${name}.png`});
+                console.error((await page.locator("body").innerText()).slice(-1800));
+                console.error('expected PDF doc', pdfDoc);
+                console.error(await page.evaluate(() => [...window.siyuan.ws.app.plugins[0].overlays.values()].map(o => ({docId: o.docId, root: o.protyle.block?.rootID, optionRoot: o.protyle.options?.rootId, loaded: o.store.loaded, loading: !!o.store.loading, blocked: o.store.blocked}))));
+            }
+            throw error;
+        } finally { await browser.close(); }
+    }
+    const sqlTargetDoc = await api('/api/filetree/createDocWithMd', {notebook, path: '/SQL source fixture', markdown: 'SQL_STATIC_SENTINEL'});
+    let sqlTarget;
+    for (let i = 0; i < 100; i++) {
+        sqlTarget = (await api('/api/query/sql', {stmt: `select id from blocks where root_id='${sqlTargetDoc}' and type='p' and content='SQL_STATIC_SENTINEL'`}))[0]?.id;
+        if (sqlTarget) break;
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert(sqlTarget);
+    const pdfFiles = async () => (await readdir(workspace, {recursive: true})).filter(path => path.toLowerCase().endsWith('.pdf')).sort();
+    for (const [name, mobile] of [['chromium', false], ['webkit', true]]) {
+        const title = `Static embed ${name}`;
+        const sqlDoc = await api('/api/filetree/createDocWithMd', {notebook, path: '/' + title, markdown:
+            `Before embeds\n\n{{select * from blocks where id='${sqlTarget}'}}\n\nMiddle ((${sqlTarget} "Reference label"))\n\n{{select * from blocks where id='${sqlTarget}'}}\n\nAfter embeds`});
+        const browser = await ({chromium, webkit}[name]).launch(name === 'chromium' ? {channel: 'chromium'} : {});
+        try {
+            const context = await browser.newContext({viewport: mobile ? {width: 390, height: 844} : {width: 1100, height: 800}, isMobile: mobile, hasTouch: mobile, acceptDownloads: true});
+            await context.request.post(base + '/api/system/loginAuth', {data: {authCode}});
+            const page = await context.newPage();
+            const generate = async () => {
+                await page.locator('[data-action="pdf"]').click();
+                await page.waitForFunction(() => /failed|ready/.test(document.querySelector('.pa-export__status')?.textContent ?? ''), {}, {timeout: 90000});
+                const status = await page.locator('.pa-export__status').innerText(); assert.match(status, /PDF ready/, status);
+                const promise = page.waitForEvent('download'); await page.locator('[data-action="download"]').click();
+                const download = await promise;
+                assert.equal((await readFile(await download.path())).subarray(0, 4).toString(), '%PDF');
+                return download;
+            };
+            await openFixture(page, sqlDoc, title, mobile);
+            const before = await pdfFiles();
+            await page.locator('.pa-handle').click();
+            await page.getByRole('button', {name: 'Export note and handwriting', exact: true}).click();
+            await page.locator('[data-best-effort]').uncheck();
+            await generate();
+            const strictWarnings = await page.locator('.pa-export__warnings li').allTextContents();
+            assert.equal(strictWarnings.filter(text => text.startsWith('SQL embed')).length, 2, 'strict mode verifies both regenerated embed ranges');
+            assert(strictWarnings.some(text => text.includes('Block references')));
+            await openFixture(page, sqlDoc, title, mobile);
+            await page.evaluate(async anchor => {
+                const {plugin, overlay} = window.inkFixture;
+                overlay.store.addStroke('pen', {color: '#ff0000', width: 5, opacity: 1, simulate: false}, [{x: 20, y: 20, p: .5}, {x: 80, y: 25, p: .6}], {blockId: anchor, ox: 0, oy: 0});
+                plugin.scheduleSave(overlay); await plugin.flushAll();
+            }, sqlTarget);
+            const writes = [];
+            page.on('request', request => { if (/\/api\/(file\/putFile|asset\/upload)$/.test(new URL(request.url()).pathname)) writes.push(request.url()); });
+            await page.locator('.pa-handle').click();
+            await page.getByRole('button', {name: 'Export note and handwriting', exact: true}).click();
+            assert(await page.locator('[data-best-effort]').isChecked());
+            const download = await generate();
+            const warnings = await page.locator('.pa-export__warnings li').allTextContents();
+            assert(warnings.some(text => text.includes('historical instance identity')));
+            assert(warnings.some(text => text.includes('thumbnail copies follow')));
+            assert.deepEqual(writes, [], 'PDF generation/download must not upload a result');
+            assert.deepEqual(await pdfFiles(), before, 'no generated PDF may remain in the kernel workspace');
+            if (process.env.PENCIL_ARTIFACT_DIR) await download.saveAs(join(process.env.PENCIL_ARTIFACT_DIR, `${name}-sql-ink.pdf`));
+            console.log(`SiYuan ${name}: strict static SQL/reference export, best-effort ink appendix and no server-side PDF result passed`);
+        } finally { await browser.close(); }
+    }
+
+    const deletionDoc = await api('/api/filetree/createDocWithMd', {notebook, path: '/Deletion lifecycle fixture', markdown: 'Disposable document for confirmed handwriting deletion.'});
+    const childDoc = await api('/api/filetree/createDocWithMd', {notebook, path: '/Deletion lifecycle fixture/Child ink fixture', markdown: 'Disposable child document.'});
+    const storage = join(workspace, 'data/storage/petal/pencil-annotation');
+    const childLegacy = join(storage, `${childDoc}.json`);
+    await writeFile(childLegacy, JSON.stringify({version: 1, docId: childDoc, updatedAt: 1, strokes: [{i: 'child-ink', t: 0, c: '#000', w: 4, o: 1, s: 0, a: 1, p: [10, 20, .5]}]}));
+    const deletionBrowser = await chromium.launch({channel: 'chromium'});
+    try {
+        const context = await deletionBrowser.newContext({viewport: {width: 1100, height: 800}});
+        await context.request.post(base + '/api/system/loginAuth', {data: {authCode}});
+        const page = await context.newPage();
+        const addInk = () => page.evaluate(async () => {
+            const {plugin, overlay} = window.inkFixture;
+            overlay.store.addStroke('pen', {color: '#123456', width: 4, opacity: 1, simulate: false}, [{x: 70, y: 70, p: .5}]);
+            plugin.scheduleSave(overlay); await plugin.flushAll();
+        });
+        const awaitDeletion = ids => page.waitForFunction(ids => { const p = window.siyuan.ws.app.plugins.find(p => p.name === 'pencil-annotation'); return ids.every(id => !p.deletionJobs.has(id) && !p.documents.has(id)); }, ids);
+        const restore = async () => {
+            const versions = (await readdir(join(workspace, 'history'), {recursive: true})).filter(path => path.endsWith(`/${deletionDoc}.sy`) && path.includes('-delete/')).sort();
+            assert(versions.length, 'kernel must have a real deleted document history');
+            await api('/api/history/rollbackDocHistory', {historyPath: 'history/' + versions.at(-1)});
+            await openFixture(page, deletionDoc, 'Deletion lifecycle fixture');
+        };
+        await openFixture(page, deletionDoc, 'Deletion lifecycle fixture'); await addInk();
+        await api('/api/filetree/removeDoc', {notebook, path: `/${deletionDoc}.sy`});
+        await awaitDeletion([deletionDoc, childDoc]);
+        for (const id of [deletionDoc, childDoc]) {
+            assert.deepEqual(await readdir(join(storage, `sync-v2/${id}`)), ['retired-v1.json']);
+            assert.equal(JSON.parse(await readFile(join(storage, `document-lifecycle/${id}/deleted-1.json`), 'utf8')).generation, 1);
+        }
+        await assert.rejects(readFile(childLegacy), {code: 'ENOENT'});
+        await restore();
+        assert.equal(await page.evaluate(() => window.inkFixture.overlay.store.strokes.length), 0, 'history restore must not restore retired ink');
+        assert.equal(await page.evaluate(() => window.inkFixture.overlay.store.generation), 1);
+        await addInk();
+        const restoredInk = await readdir(join(storage, `sync-v2/${deletionDoc}/g1`));
+        assert(restoredInk.some(name => name.startsWith('w')));
+        await api('/api/filetree/removeDoc', {notebook, path: `/${deletionDoc}.sy`});
+        await page.getByText('Confirm permanent handwriting cleanup', {exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Cancel', exact: true}).click();
+        await awaitDeletion([deletionDoc]);
+        assert.deepEqual(await readdir(join(storage, `sync-v2/${deletionDoc}/g1`)), restoredInk, 'declining uncertain retirement preserves ink');
+        await restore();
+        assert.equal(await page.evaluate(() => window.inkFixture.overlay.store.strokes.length), 1);
+        await api('/api/filetree/removeDoc', {notebook, path: `/${deletionDoc}.sy`});
+        await page.getByText('Confirm permanent handwriting cleanup', {exact: true}).waitFor();
+        await page.getByRole('button', {name: 'Confirm', exact: true}).click();
+        await awaitDeletion([deletionDoc]);
+        await assert.rejects(readdir(join(storage, `sync-v2/${deletionDoc}/g1`)), {code: 'ENOENT'});
+        assert.equal(JSON.parse(await readFile(join(storage, `document-lifecycle/${deletionDoc}/deleted-2.json`), 'utf8')).generation, 2);
+        console.log('SiYuan chromium: parent/child deletion cleanup, genuine history restore, fresh ink and cancel/confirm of reused-ID deletion passed');
+    } finally { await deletionBrowser.close(); }
 } finally {
     if (!startError && child.exitCode === null && child.signalCode === null) {
         const exited = once(child, "exit"); child.kill("SIGTERM");

@@ -252,6 +252,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
         log(`export blob: ${blob.size} bytes`);
         return blob.size;
     },
+    projectedEnd(stroke: any) {
+        const point = stroke.points[stroke.points.length - 1];
+        const offset = overlay.strokeOffsets()(stroke);
+        if (!offset) throw new Error("Missing anchor");
+        return {...point, x: point.x + offset.dx, y: point.y + offset.dy};
+    },
     strokesCount() {
         return overlay.store.strokes.length;
     },

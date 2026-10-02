@@ -14,7 +14,7 @@ export class StrokeRenderer {
     private static rev(stroke: Stroke): string {
         const pts = stroke.points;
         const first = pts[0], last = pts[pts.length - 1];
-        return `${pts.length}|${first ? first.x : 0},${first ? first.y : 0}|${last ? last.x : 0},${last ? last.y : 0}`;
+        return `${stroke.revision ?? ""}|${pts.length}|${first ? first.x : 0},${first ? first.y : 0}|${last ? last.x : 0},${last ? last.y : 0}`;
     }
 
     private static outline(stroke: Stroke, live: boolean): number[][] {
@@ -73,7 +73,7 @@ export interface Viewport {
 }
 
 /** per-stroke render offset (block-anchor delta in doc coords) */
-export type OffsetFn = (stroke: Stroke) => {dx: number; dy: number};
+export type OffsetFn = (stroke: Stroke) => {dx: number; dy: number} | null;
 
 /**
  * Paints strokes onto a 2d context. The caller has already applied the
@@ -101,6 +101,7 @@ export const paintStrokes = (
     for (const stroke of strokes) {
         if (skip && skip(stroke)) continue;
         const off = offsets ? offsets(stroke) : {dx: 0, dy: 0};
+        if (!off) continue;
         const {path, bbox} = renderer.getPath(stroke);
         if (!bboxesIntersect(
             {minX: bbox.minX + off.dx, minY: bbox.minY + off.dy, maxX: bbox.maxX + off.dx, maxY: bbox.maxY + off.dy},
@@ -121,9 +122,10 @@ export const paintOne = (
     stroke: Stroke,
     renderer: StrokeRenderer,
     viewport: Viewport,
-    offset?: {dx: number; dy: number},
+    offset?: {dx: number; dy: number} | null,
     live = true,
 ) => {
+    if (offset === null) return;
     ctx.save();
     ctx.translate(-viewport.originX, -viewport.originY);
     if (offset) ctx.translate(offset.dx, offset.dy);

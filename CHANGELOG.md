@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 (2026-10-02)
+
+- Adopt block-relative anchored ink with deterministic legacy migration, preserved zero origins/fallback placement, export-local projections, and atomic reanchor/undo geometry.
+- Add independent immutable writer snapshots under `sync-v2/`; moves and deletes retire observed value revisions instead of overwriting another browser's JSON. Concurrent edits remain separate selectable copies.
+- Preserve old files, verify writes/read-back, keep two covered cumulative snapshots per writer, release caches for closed clean documents, and pause on integrity/capacity errors. Add raw JSON backup and explicit additive legacy reconciliation.
+- Add full-note browser PDF export, adapted from upstream `a46944b`: full-source coverage checks, folded/unloaded content, title/math/ink, fixed A4 image pages, bounded strict SVG decoding, cancellation and download links.
+- Support SiYuan 3.8.6 static SQL embeds and references despite regenerated export IDs. Best-effort export defaults on, with compatible text/placeholders and in-PDF warnings; strict mode remains available. Unverifiable ink (including provenance-free ink in SQL documents) goes into a labelled appendix instead of being misplaced. Missing-child degradation reaches ancestor anchors; reports stay below legitimate below-document ink.
+- Load PDF dependencies only on demand from a separate `pdf.js` browser module; retain lightweight handwriting startup and the existing PNG flow.
+- Redesign the export dialog for desktop/mobile, including progress, cancellation, download, backup and sync-recovery actions.
+- Fix mobile editor reuse retaining a stale `options.rootId`; use the loaded block's canonical root ID so switching documents cannot attach the previous document's ink.
+- Isolate pen down and pen context menus on the owning editor's 3.8 table/gutter auxiliary controls, preserving normal mouse input, toolbar behavior and continuous strokes.
+- Permanently retire document handwriting on verified successful deletion, including notified child documents. Use immutable lifecycle markers and fresh restored-document namespaces, fence/settle old writes, invalidate retired stores and clean late old-generation files. Ambiguous/reused-ID notifications require confirmation; missing/closed/locked documents alone never authorize erasure. Existing history/cloud/downloaded backups are outside this cleanup.
+- Ignore obsolete initial-load errors after a newer load recovers; scope export cancellation to the deleted document.
+- Expand state, browser and real-host tests for concurrent writers/restarts, selective conflicts, old-client barriers/import, budgets, PDF pixels/downloads, static embeds, deletion races and genuine history restore/confirmation. On isolated SiYuan 3.8.6, both browser engines verified no generated PDF upload or new workspace PDF file. Actual Docker-container/cloud-sync runs were not performed.
+
 ## 0.2.4 (2026-10-01)
 
 - Declare the Docker backend to fix the compatibility false negative.

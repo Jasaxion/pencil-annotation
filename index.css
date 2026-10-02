@@ -337,6 +337,25 @@
     .pa-toolbar .pa-width input[type="range"] { position: static; transform: none; }
 }
 
+.pa-sync-warning { width: auto; max-width: 180px; padding: 0 8px; color: #ffb4ab; font-size: 12px; }
+
+/* ---------- export dialog ---------- */
+.pa-export [hidden] { display: none !important; }
+.pa-export [aria-disabled="true"] { opacity: .45; pointer-events: none; }
+.pa-export .config-item { padding: 16px; }
+.pa-export .config-name { margin: 0 0 8px; font-size: 16px; }
+.pa-export__row, .pa-export__radios { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+.pa-export__status { min-height: 1.4em; overflow-wrap: anywhere; }
+.pa-export__progress { width: 100%; margin-top: 8px; }
+.pa-export__best-effort { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.pa-export__warnings { margin-top: 10px; overflow-wrap: anywhere; }
+.pa-export__warnings summary { cursor: pointer; }
+.pa-export a { text-decoration: none; }
+@media (max-width: 520px) {
+    .pa-export .config-item { padding: 12px; }
+    .pa-export__row > .b3-button { flex: 1 1 auto; justify-content: center; }
+}
+
 /* ---------- topbar icon ---------- */
 svg.pa-topbar-svg {
     width: 16px;
