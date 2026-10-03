@@ -25,7 +25,9 @@ export interface CurrentLayout {live: HTMLElement; hints: Map<string, Hint | nul
 /** Snapshot the same first DOM occurrence used by DocOverlay.buildOffsets.
  * This is current-display identity, not a reconstruction of historical authorship. */
 export function captureCurrentLayout(source: HTMLElement, strokes: Stroke[]): CurrentLayout {
-    const live = source.cloneNode(true) as HTMLElement;
+    // Only embed snapshots need a live DOM copy. Ordinary source blocks are
+    // assembled from the complete kernel DOM and their hints below.
+    const live = source.querySelector(QUERY) ? source.cloneNode(true) as HTMLElement : document.createElement('div');
     live.querySelectorAll(`[${INK_TARGET}]`).forEach(el => el.removeAttribute(INK_TARGET));
     const ids = new Set(strokes.flatMap(s => s.anchor ? [s.anchor.blockId] : []));
     const originals = [...source.querySelectorAll<HTMLElement>('[data-node-id]')];
@@ -38,7 +40,7 @@ export function captureCurrentLayout(source: HTMLElement, strokes: Stroke[]): Cu
         const rect = element.getBoundingClientRect();
         if (!rect.width || !rect.height) { hints.set(id, null); return; }
         const hint = {key: `ink-${index}`, scope: element.closest<HTMLElement>(QUERY)?.dataset.nodeId ?? null, width: rect.width, height: rect.height, text: contentFingerprint(element)};
-        copies[index].setAttribute(INK_TARGET, hint.key); hints.set(id, hint);
+        copies[index]?.setAttribute(INK_TARGET, hint.key); hints.set(id, hint);
     });
     return {live, hints};
 }

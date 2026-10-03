@@ -138,10 +138,13 @@ export function exportStrokesDialog(overlay: DocOverlay, t: I18nFn, pluginName =
                 if (!overlay.store.loaded) throw new Error("Wait for handwriting to load before exporting");
                 const source = overlay.protyle.wysiwyg?.element;
                 if (!source) throw new Error("No document editor");
-                const input = {docId: overlay.docId, source, strokes: overlay.store.snapshotStrokes(overlay.store.strokes)};
-                // A separate browser ESM asset keeps PDF dependencies out of normal handwriting startup.
+                // Resolve the module first; the PDF engine then takes the single
+                // immutable ink snapshot together with the current layout.
                 const url = __PENCIL_DEV__ ? "/src/plugin/exportPdf.ts" : `/plugins/${encodeURIComponent(pluginName)}/pdf.js?v=${encodeURIComponent(__PENCIL_VERSION__)}`;
                 const module = await import(/* @vite-ignore */ url) as typeof PdfModule;
+                const rootId = overlay.protyle.block?.rootID || overlay.protyle.options?.rootId;
+                if (rootId !== overlay.docId || overlay.store.retiredDocument) throw new Error('The source document changed; reopen export');
+                const input = {docId: overlay.docId, source, strokes: overlay.store.strokes};
                 const result = await module.buildNotePdfBlob(input, {signal: controller.signal, request: kernelJSON, bestEffort: compatible, layout: selectedLayout, text: t,
                     renderers: {math: el => ProtyleMethod.mathRender(el)},
                     onProgress: (stage, done, total) => {
@@ -159,7 +162,7 @@ export function exportStrokesDialog(overlay: DocOverlay, t: I18nFn, pluginName =
                     warnings.querySelector("summary")!.textContent = t("exportWarningsSummary", {count: String(result.warnings.length)});
                     for (const message of result.warnings) { const item = document.createElement("li"); item.textContent = message; warnings.querySelector("ul")!.append(item); }
                 }
-            } catch (error) { fail(error, controller.signal); }
+            } catch (error) { fail(error, controller.signal); controller.abort(); }
             finally { finish(controller); }
         })();
     });

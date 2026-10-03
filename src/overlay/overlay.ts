@@ -90,6 +90,7 @@ export class DocOverlay {
     private scrollEl: HTMLElement | null = null;
     private redrawScheduled = false;
     private liveFrame: number | null = null;
+    private liveTimer: number | null = null;
 
     // active pointer state
     private activePointerId: number | null = null;
@@ -104,7 +105,7 @@ export class DocOverlay {
     private eraseHitSomething = false;
 
     // selection drag
-    private selDrag: {lastX: number; lastY: number; totalDx: number; totalDy: number; before: Stroke[]} | null = null;
+    private selDrag: {lastX: number; lastY: number; totalDx: number; totalDy: number; before: Stroke[] | null} | null = null;
 
     // Only the owning pointer may change an in-progress stroke.
     private touchPointers = new Set<number>();
@@ -445,17 +446,19 @@ export class DocOverlay {
     private scheduleRedraw = () => {
         if (this.redrawScheduled || this.destroyed) return;
         this.redrawScheduled = true;
-        let done = false;
+        let done = false, frame: number | undefined, timer: number | undefined;
         const run = () => {
             if (done) return;
             done = true;
+            if (frame !== undefined) cancelAnimationFrame(frame);
+            if (timer !== undefined) clearTimeout(timer);
             this.redrawScheduled = false;
             if (!this.destroyed) this.redrawAll();
         };
-        requestAnimationFrame(run);
+        frame = requestAnimationFrame(run);
         // rAF never fires while the window is hidden/occluded (SiYuan keeps
         // running in the tray); the timeout guarantees the repaint happens
-        window.setTimeout(run, 150);
+        timer = window.setTimeout(run, 150);
     };
 
     redrawAll() {
@@ -481,10 +484,18 @@ export class DocOverlay {
 
     private scheduleLive() {
         if (this.liveFrame !== null) return;
-        this.liveFrame = requestAnimationFrame(() => {
-            this.liveFrame = null;
+        let done = false, frame: number;
+        const run = () => {
+            if (done) return;
+            done = true;
+            if (this.liveFrame !== frame) return;
+            if (this.liveFrame !== null) cancelAnimationFrame(this.liveFrame);
+            if (this.liveTimer !== null) clearTimeout(this.liveTimer);
+            this.liveFrame = this.liveTimer = null;
             if (!this.destroyed) this.redrawLive();
-        });
+        };
+        frame = requestAnimationFrame(run); this.liveFrame = frame;
+        this.liveTimer = window.setTimeout(run, 150);
     }
 
     /** live layer: current stroke / eraser cursor / selection box */
@@ -522,7 +533,7 @@ export class DocOverlay {
             ctx.restore();
         } else if (this.selected.length > 0) {
             const boxes = this.selected.flatMap((s) => {
-                const b = this.renderer.getPath(s).bbox;
+                const b = this.renderer.getBounds(s);
                 const o = offsetsFn(s);
                 return o ? [{minX: b.minX + o.dx, minY: b.minY + o.dy, maxX: b.maxX + o.dx, maxY: b.maxY + o.dy}] : [];
             });
@@ -803,11 +814,11 @@ export class DocOverlay {
             const offsets = this.buildOffsets();
             const hit = this.store.strokes.find((s) => {
                 const o = offsets(s);
-                return o ? pointHitsStroke(s, pt.x - o.dx, pt.y - o.dy, SELECT_THRESHOLD) : false;
+                return o ? pointHitsStroke(s, pt.x - o.dx, pt.y - o.dy, SELECT_THRESHOLD, this.renderer.getBounds(s)) : false;
             });
             this.selected = hit ? [hit] : [];
             if (hit) {
-                this.selDrag = {lastX: pt.x, lastY: pt.y, totalDx: 0, totalDy: 0, before: this.store.snapshotStrokes(this.selected)};
+                this.selDrag = {lastX: pt.x, lastY: pt.y, totalDx: 0, totalDy: 0, before: null};
             }
             this.redrawLive();
             this.deps.onStateChange();
@@ -863,6 +874,7 @@ export class DocOverlay {
                     return; // stay snapped while the pen rests
                 }
             }
+            let pushed = false;
             for (const ev of samples) {
                 const last = this.curPoints[this.curPoints.length - 1];
                 const pressure = final && ev.pressure === 0 ? last.p : Math.max(0.04, Math.min(1, ev.pressure || 0.25));
@@ -872,23 +884,30 @@ export class DocOverlay {
                 // Keep short turns and pressure changes; only exact duplicates add no information.
                 if (p.x === last.x && p.y === last.y && p.p === last.p) continue;
                 this.curMoved = Math.max(this.curMoved, Math.hypot(p.x - this.curStart.x, p.y - this.curStart.y));
-                this.curPoints.push(p);
+                this.curPoints.push(p); pushed = true;
             }
             this.lastMoveAt = Date.now();
             if (!final && this.deps.settings.shapeSnap) this.scheduleShapeCheck();
-            if (!final) this.scheduleLive();
+            if (!final && pushed) this.scheduleLive();
         } else if (this.erasing) {
-            let first = this.curPoints[this.curPoints.length - 1];
+            let first = this.curPoints[this.curPoints.length - 1], sampled = false;
+            const offsets = this.buildOffsets();
             for (const ev of samples) {
                 const p = {x: ev.clientX - rect.left, y: ev.clientY - rect.top, p: 0.5};
-                this.eraseSegment(first.x, first.y, p.x, p.y);
-                this.curPoints.push(p);
-                first = p;
+                if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+                // Only redundant samples within this synchronous batch are skipped;
+                // the next event may see moved/reflowed document blocks.
+                if (sampled && p.x === first.x && p.y === first.y) continue;
+                this.eraseSegment(first.x, first.y, p.x, p.y, offsets);
+                first = p; sampled = true;
             }
+            this.curPoints = [first]; // only the cursor/next segment needs the endpoint
             if (!final) this.scheduleLive();
         } else if (this.selDrag) {
             const dx = pt.x - this.selDrag.lastX;
             const dy = pt.y - this.selDrag.lastY;
+            if (!dx && !dy) return;
+            this.selDrag.before ??= this.store.snapshotStrokes(this.selected);
             this.selDrag.lastX = pt.x;
             this.selDrag.lastY = pt.y;
             this.selDrag.totalDx += dx;
@@ -941,7 +960,8 @@ export class DocOverlay {
 
     private finishPointer() {
         if (this.liveFrame !== null) cancelAnimationFrame(this.liveFrame);
-        this.liveFrame = null;
+        if (this.liveTimer !== null) clearTimeout(this.liveTimer);
+        this.liveFrame = this.liveTimer = null;
         const id = this.activePointerId;
         this.activePointerId = null;
         if (DocOverlay.inputOwner === this) DocOverlay.inputOwner = null;
@@ -1110,6 +1130,7 @@ export class DocOverlay {
         const drag = this.selDrag;
         if (!drag) return;
         this.selDrag = null;
+        if (!drag.before) return; // selecting without moving needs no geometry copy/undo
         if (!drag.totalDx && !drag.totalDy) {
             // Out-and-back drags must not leave accumulated rounding in the reused view.
             for (const stroke of this.selected) {
@@ -1216,13 +1237,12 @@ export class DocOverlay {
         return committed;
     }
 
-    private eraseSegment(x1: number, y1: number, x2: number, y2: number) {
+    private eraseSegment(x1: number, y1: number, x2: number, y2: number, offsets = this.buildOffsets()) {
         const r = this.deps.settings.eraserRadius;
-        const offsets = this.buildOffsets();
         const removed = this.store.eraseWhere((s) => {
             const o = offsets(s);
             // shift the test segment into the stroke's creation-space
-            return o ? segmentHitsStroke(s, x1 - o.dx, y1 - o.dy, x2 - o.dx, y2 - o.dy, r) : false;
+            return o ? segmentHitsStroke(s, x1 - o.dx, y1 - o.dy, x2 - o.dx, y2 - o.dy, r, this.renderer.getBounds(s)) : false;
         });
         if (removed.length > 0) {
             this.eraseHitSomething = true;

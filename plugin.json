@@ -2,7 +2,7 @@
   "name": "pencil-annotation",
   "author": "Ray Zhang",
   "url": "https://github.com/Jasaxion/pencil-annotation",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "minAppVersion": "3.1.0",
   "kernels": ["windows", "linux", "darwin", "android", "ios", "harmony"],
   "backends": ["windows", "linux", "darwin", "docker", "android", "ios", "harmony"],

@@ -9,13 +9,26 @@ import type {Stroke} from "./types";
  * scrolling and full redraws stay cheap.
  */
 export class StrokeRenderer {
-    private cache = new Map<string, { rev: string; path: Path2D; bbox: BBox }>();
+    private cache = new Map<string, {rev: string; path?: Path2D; bbox: BBox}>();
 
     private static rev(stroke: Stroke): string {
         const pts = stroke.points;
         const first = pts[0], last = pts[pts.length - 1];
-        return `${stroke.revision ?? ""}|${pts.length}|${first ? first.x : 0},${first ? first.y : 0}|${last ? last.x : 0},${last ? last.y : 0}`;
+        return `${stroke.revision ?? ""}|${stroke.width}|${stroke.tool}|${stroke.simulate}|${pts.length}|${first ? first.x : 0},${first ? first.y : 0},${first?.p ?? 0}|${last ? last.x : 0},${last ? last.y : 0},${last?.p ?? 0}`;
     }
+
+    private geometry(stroke: Stroke) {
+        const rev = StrokeRenderer.rev(stroke);
+        let cached = this.cache.get(stroke.id);
+        if (!cached || cached.rev !== rev) {
+            cached = {rev, bbox: strokeBBox(stroke)};
+            this.cache.set(stroke.id, cached);
+        }
+        return cached;
+    }
+
+    /** Bounds are cheap to retain; offscreen strokes need no outline/Path2D. */
+    getBounds(stroke: Stroke): BBox { return this.geometry(stroke).bbox; }
 
     private static outline(stroke: Stroke, live: boolean): number[][] {
         // perfect-freehand accepts [x, y, pressure] tuples
@@ -34,11 +47,8 @@ export class StrokeRenderer {
 
     /** Path2D in document coordinates for the given stroke. */
     getPath(stroke: Stroke, live = false): { path: Path2D; bbox: BBox } {
-        const rev = StrokeRenderer.rev(stroke);
-        const cached = this.cache.get(stroke.id);
-        if (cached && cached.rev === rev && !live) {
-            return cached;
-        }
+        const cached = live ? {rev: '', bbox: strokeBBox(stroke), path: undefined as Path2D | undefined} : this.geometry(stroke);
+        if (cached.path && !live) return cached as {path: Path2D; bbox: BBox};
         const outline = StrokeRenderer.outline(stroke, live);
         const path = new Path2D();
         if (outline.length > 0) {
@@ -48,11 +58,8 @@ export class StrokeRenderer {
             }
             path.closePath();
         }
-        const bbox = strokeBBox(stroke);
-        if (!live) {
-            this.cache.set(stroke.id, {rev, path, bbox});
-        }
-        return {path, bbox};
+        cached.path = path;
+        return cached as {path: Path2D; bbox: BBox};
     }
 
     forget(id: string) {
@@ -102,11 +109,12 @@ export const paintStrokes = (
         if (skip && skip(stroke)) continue;
         const off = offsets ? offsets(stroke) : {dx: 0, dy: 0};
         if (!off) continue;
-        const {path, bbox} = renderer.getPath(stroke);
+        const bbox = renderer.getBounds(stroke);
         if (!bboxesIntersect(
             {minX: bbox.minX + off.dx, minY: bbox.minY + off.dy, maxX: bbox.maxX + off.dx, maxY: bbox.maxY + off.dy},
             view,
         )) continue;
+        const {path} = renderer.getPath(stroke);
         ctx.save();
         ctx.translate(off.dx, off.dy);
         ctx.globalAlpha = stroke.opacity;

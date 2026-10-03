@@ -20,7 +20,8 @@ try {
                 const stroke = (id, anchor, color = '#ff0000') => ({id, anchor: {blockId: anchor, ox: 0, oy: 0}, color, tool: 'pen', width: 6, opacity: 1, simulate: false, createdAt: 1, points: [{x: 15, y: 20, p: .6}, {x: 70, y: 20, p: .6}]});
                 const strokes = [stroke('before-ink', 'before'), stroke('left-ink', 'left'), stroke('right-ink', 'right'), stroke('embedded-ink', 'target', '#ff8800'), stroke('tail-ink', 'tail'), stroke('unloaded-ink', 'q3'), stroke('missing-ink', 'not-found')];
                 const original = JSON.stringify(strokes), htmlBefore = source.innerHTML;
-                let columnLayout = false, witnessedOccurrence = false, tailPresent = false, orangePixel = false;
+                const requests = [];
+                let columnLayout = false, witnessedOccurrence = false, tailPresent = false, orangePixel = false, fallbackGroups = 0;
                 const encode = HTMLCanvasElement.prototype.toDataURL;
                 HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
                     if (type === 'image/jpeg' && quality === .94) {
@@ -37,15 +38,20 @@ try {
                 let pdf;
                 try {
                     pdf = await buildNotePdfBlob({docId, source, strokes}, {signal: new AbortController().signal,
-                        request: async (path, data) => path.endsWith('getBlockDOM') ? {id: docId, dom: raw}
-                            : data.id === docId ? {id: docId, type: 'NodeDocument', name: 'Current layout', content: p('print-only', 'A deliberately different native print layout')}
-                                : {id: data.id, type: 'NodeBlockQueryEmbed', content: p('generated-result', 'UNLOADED_STATIC_RESULT').replace('data-node-id=', 'data-pa-pdf-anchor="ink-0" data-node-id=')},
+                        request: async (path, data) => {
+                            requests.push({path,id:data.id});
+                            if (path.endsWith('getBlockDOM')) return {id: docId, dom: raw};
+                            if (path.endsWith('getDocInfo')) return {id: docId, rootID: docId, name: 'Current layout', ial: {}};
+                            if (data.id === docId) throw new Error('Redundant full native export');
+                            return {id: data.id, type: 'NodeBlockQueryEmbed', content: p('generated-result', 'UNLOADED_STATIC_RESULT').replace('data-node-id=', 'data-pa-pdf-anchor="ink-0" data-node-id=')};
+                        },
                         onProgress: stage => { if (stage === 'page') {
                             const body = document.querySelector('.pa-pdf-host .protyle-wysiwyg');
                             const left = body.querySelector('[data-node-id="left"]').getBoundingClientRect(), right = body.querySelector('[data-node-id="right"]').getBoundingClientRect();
                             columnLayout = Math.abs(left.top - right.top) < 1 && right.left > left.right;
                             const target = body.querySelector('[data-node-id="target"][data-pa-pdf-anchor]');
                             witnessedOccurrence = !!target && target.closest('[data-type="NodeBlockQueryEmbed"]').dataset.nodeId === 'q1';
+                            fallbackGroups = body.querySelectorAll('.pa-pdf-compatibility svg').length;
                             tailPresent = body.textContent.includes('FULL_SOURCE_TAIL') && body.textContent.includes('LIVE_EMBED_TWO') && body.textContent.includes('UNLOADED_STATIC_RESULT');
                         }} });
                 } finally { HTMLCanvasElement.prototype.toDataURL = encode; }
@@ -53,7 +59,7 @@ try {
                 const checkChanged = async (live, raw, id) => {
                     source.innerHTML = p(id, live);
                     return buildNotePdfBlob({docId, source, strokes: [stroke('changed', id)]}, {signal: new AbortController().signal,
-                        request: async path => path.endsWith('getBlockDOM') ? {id: docId, dom: p(id, raw)} : {id: docId, type: 'NodeDocument', name: 'Changed content', content: p(id, raw)}});
+                        request: async path => path.endsWith('getBlockDOM') ? {id: docId, dom: p(id, raw)} : {id: docId, rootID: docId, type: 'NodeDocument', name: 'Changed content', content: p(id, raw)}});
                 };
                 const textChanged = await checkChanged('Visible old text', 'Different saved text', 'changed-text');
                 const image = color => `<img style="width:20px;height:20px" src="data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="${color}"/></svg>`)}">`;
@@ -66,22 +72,24 @@ try {
                 const iconHTML = p('icon', '<svg width="20" height="20"><use href="#pdf-safe-symbol"></use></svg>'); source.innerHTML = iconHTML;
                 let expandedSymbolSafe = false;
                 try { await buildNotePdfBlob({docId, source, strokes: []}, {signal: new AbortController().signal,
-                    request: async path => path.endsWith('getBlockDOM') ? {id: docId, dom: iconHTML} : {id: docId, type:'NodeDocument', name:'Icon', content:iconHTML},
+                    request: async path => path.endsWith('getBlockDOM') ? {id: docId, dom: iconHTML} : {id: docId, rootID: docId, type:'NodeDocument', name:'Icon', content:iconHTML},
                     onProgress: stage => { if (stage === 'page') {const path = document.querySelector('.pa-pdf-host svg path'); expandedSymbolSafe = !!path && !path.hasAttribute('onclick');} }}); }
                 finally { sprite.remove(); }
                 const {captureCurrentLayout, prepareCurrentLayout} = await import('/src/plugin/pdfLayout.ts');
                 const {compatibility} = await import('/src/plugin/pdfCompatibility.ts');
+                const noOrdinaryLiveClone = captureCurrentLayout(source, []).live.childNodes.length === 0;
                 const many = Array.from({length: 35}, (_, i) => `many-${i}`);
                 source.innerHTML = many.slice(0, 34).map(id => q(id, p(`value-${id}`, 'Loaded'))).join('');
                 const template = document.createElement('template'); template.innerHTML = many.map(id => q(id)).join('');
                 let focusedCalls = 0;
                 await prepareCurrentLayout(template.content, captureCurrentLayout(source, []), docId, async (path, data) => {focusedCalls++; return {id: data.id, type: 'NodeBlockQueryEmbed', content:p('late-result','LATE_STATIC_RESULT')};}, new AbortController().signal, compatibility(true));
                 const requestBudget = focusedCalls === 1 && template.content.textContent.includes('LATE_STATIC_RESULT');
-                return {columnLayout, witnessedOccurrence, tailPresent, orangePixel, expandedSymbolSafe, requestBudget,
+                return {columnLayout, witnessedOccurrence, tailPresent, orangePixel, expandedSymbolSafe, requestBudget, noOrdinaryLiveClone,
                     activeHtmlBlocked: location.href === address && meta.warnings.some(w => w.includes('meta')),
-                    changedContentSeparated: textChanged.warnings.some(w => w.startsWith('1 strokes')) && imageChanged.warnings.some(w => w.startsWith('1 strokes')),
+                    noRedundantPreview: requests.filter(r => r.path.endsWith('exportPreviewHTML') && r.id === docId).length === 0 && requests.filter(r => r.path.endsWith('getDocInfo')).length === 1 && requests.filter(r => r.path.endsWith('getBlockDOM')).length === 2,
+                    changedContentSeparated: textChanged.warnings.some(w => w.startsWith('Some ink')) && imageChanged.warnings.some(w => w.startsWith('Some ink')),
                     canvasReported: canvas.warnings.some(w => w.includes('canvas')),
-                    individualFallback: pdf.warnings.some(w => w.startsWith('2 strokes')) && !pdf.warnings.some(w => w.startsWith('7 strokes')),
+                    individualFallback: fallbackGroups === 2 && pdf.warnings.some(w => w.startsWith('Some ink')) && !pdf.warnings.some(w => /\d+ strokes/.test(w)),
                     immutable, valid: await pdf.blob.slice(0, 4).text() === '%PDF', clean: !document.querySelector('.pa-pdf-host')};
             });
             Object.entries(result).forEach(([key, value]) => assert(value, `${name}: ${key} ${JSON.stringify(result)}`));

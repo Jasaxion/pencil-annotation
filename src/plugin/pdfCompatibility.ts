@@ -152,7 +152,7 @@ export async function mapStaticEmbeds(source: DocumentFragment, html: DocumentFr
 }
 
 export function appendCompatibilityReport(body: HTMLElement, orphans: Stroke[], state: PdfCompatibility, background: string) {
-    if (orphans.length) state.warn(state.text("exportUnplacedInk", "{count} strokes could not be safely attached to the exported content; thumbnail copies follow", {count: String(orphans.length)}));
+    if (orphans.length) state.warn(state.text("exportUnplacedInk", "Some ink could not be safely attached to the exported content; separate previews follow"));
     if (!state.warnings.length && !orphans.length) return;
     const report = document.createElement("section"); report.className = "pa-pdf-compatibility";
     report.style.cssText = "margin-top:24px;border-top:1px solid #888;padding:12px 0;white-space:normal;overflow-wrap:anywhere";
@@ -165,11 +165,11 @@ export function appendCompatibilityReport(body: HTMLElement, orphans: Stroke[], 
     for (const [id, strokes] of groups) {
         if (groupCount >= 40) {
             const rest = document.createElement("p");
-            rest.textContent = `${groups.size - groupCount} — ${state.text("exportPreviewLimited", "Preview limit reached; use the JSON backup for full data")}`;
+            rest.textContent = state.text("exportPreviewLimited", "Preview limit reached; use the JSON backup for full data");
             report.append(rest); break;
         }
         groupCount++;
-        const label = document.createElement("p"); label.textContent = `${state.text("exportInkAppendix", "Unplaced ink preview — not its document position")} (${id}, ${strokes.length})`; report.append(label);
+        const label = document.createElement("p"); label.textContent = `${state.text("exportInkAppendix", "Unplaced ink preview — not its document position")} (${id})`; report.append(label);
         // ponytail: bounded SVG thumbnails, not another full-resolution ink export.
         // Original data stays in the note/JSON backup; avoid one canvas per orphan.
         if (pointBudget <= 0) { label.append(` — ${state.text("exportPreviewLimited", "Preview limit reached; use the JSON backup for full data")}`); continue; }
@@ -184,7 +184,9 @@ export function appendCompatibilityReport(body: HTMLElement, orphans: Stroke[], 
         for (const stroke of strokes) {
             if (pointBudget <= 0) break;
             const step = Math.max(1, Math.ceil(stroke.points.length / Math.min(1000, pointBudget)));
-            const samples = stroke.points.filter((_, i) => i % step === 0); const last = stroke.points[stroke.points.length-1];
+            const samples = [];
+            for (let i = 0; i < stroke.points.length; i += step) samples.push(stroke.points[i]);
+            const last = stroke.points[stroke.points.length-1];
             if (samples[samples.length-1] !== last) samples.push(last); pointBudget -= samples.length;
             if (samples.length === 1) {
                 const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");

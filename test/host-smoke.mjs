@@ -271,8 +271,10 @@ try {
         console.log("SiYuan multi-browser: concurrent moves, selective conflict deletion, clear/add, restart, snapshot pruning and legacy barrier passed");
     } finally { await concurrentBrowser.close(); }
 
+    await mkdir(join(workspace, 'data/assets'), {recursive: true});
+    await writeFile(join(workspace, 'data/assets/pencil-test-blue.svg'), '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="#0000ff"/></svg>');
     const pdfDoc = await api("/api/filetree/createDocWithMd", {notebook, path: "/Complete PDF fixture", markdown:
-        "# PDF folded heading\n\nHidden PDF child\n\nInline math $x^2$\n\n" + Array.from({length: 160}, (_, i) => `Full PDF paragraph ${i}${i === 159 ? " FINAL_PDF_SENTINEL" : ""}`).join("\n\n")});
+        "# PDF folded heading\n\nHidden PDF child\n\nInline math $x^2$\n\n![Blue asset](assets/pencil-test-blue.svg)\n\n" + Array.from({length: 160}, (_, i) => `Full PDF paragraph ${i}${i === 159 ? " FINAL_PDF_SENTINEL" : ""}`).join("\n\n")});
     let heading, last;
     for (let i = 0; i < 100; i++) {
         const blocks = await api("/api/query/sql", {stmt: `select id,type,content from blocks where root_id='${pdfDoc}' and (content='PDF folded heading' or content like '%FINAL_PDF_SENTINEL%')`});
@@ -297,8 +299,11 @@ try {
                 HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
                     if (type === "image/jpeg" && quality === .94) {
                         const bytes = this.getContext("2d").getImageData(0, 0, this.width, this.height).data;
-                        let red = 0; for (let i = 0; i < bytes.length; i += 4) if (bytes[i] > 180 && bytes[i+1] < 90 && bytes[i+2] < 90) red++;
-                        window.pdfRasterStats.push({red, width: this.width, height: this.height, tail: document.querySelector('.pa-pdf-host')?.textContent.includes('FINAL_PDF_SENTINEL')});
+                        let red = 0, blue = 0; for (let i = 0; i < bytes.length; i += 4) {
+                            if (bytes[i] > 180 && bytes[i+1] < 90 && bytes[i+2] < 90) red++;
+                            if (bytes[i+2] > 180 && bytes[i] < 90 && bytes[i+1] < 90) blue++;
+                        }
+                        window.pdfRasterStats.push({red, blue, width: this.width, height: this.height, tail: document.querySelector('.pa-pdf-host')?.textContent.includes('FINAL_PDF_SENTINEL')});
                     }
                     return original.call(this, type, quality);
                 };
@@ -310,7 +315,8 @@ try {
             const status = await page.locator(".pa-export__status").innerText(); assert.match(status, /PDF ready/, status);
             const raster = await page.evaluate(() => window.pdfRasterStats);
             assert(raster.length > 1 && raster.at(-1).red > 0 && raster.every(page => page.tail), "full source and last-block ink must remain in the current-layout PDF");
-            assert(!(await page.locator('.pa-export__warnings li').allTextContents()).some(text => text.includes('thumbnail copies follow')), 'ordinary folded/unloaded ink must stay on the note');
+            assert(raster.some(page => page.blue > 0), 'workspace image resources must remain embedded in current-layout PDF');
+            assert(!(await page.locator('.pa-export__warnings li').allTextContents()).some(text => text.includes('separate previews follow')), 'ordinary folded/unloaded ink must stay on the note');
             const downloadPromise = page.waitForEvent("download"); await page.locator('[data-action="download"]').click();
             const download = await downloadPromise; const bytes = await readFile(await download.path());
             assert.equal(bytes.subarray(0, 4).toString(), "%PDF");
@@ -399,17 +405,22 @@ try {
                     return encode.call(this, type, quality);
                 };
             }, sqlTarget);
-            const writes = [];
-            page.on('request', request => { if (/\/api\/(file\/putFile|asset\/upload)$/.test(new URL(request.url()).pathname)) writes.push(request.url()); });
+            const writes = [], fullPreviews = [];
+            page.on('request', request => {
+                const path = new URL(request.url()).pathname;
+                if (/\/api\/(file\/putFile|asset\/upload)$/.test(path)) writes.push(request.url());
+                if (path === '/api/export/exportPreviewHTML' && request.postDataJSON()?.id === sqlDoc) fullPreviews.push(path);
+            });
             await page.locator('.pa-handle').click();
             await page.getByRole('button', {name: 'Export note and handwriting', exact: true}).click();
             assert(await page.locator('[data-best-effort]').isChecked());
             const download = await generate();
             const warnings = await page.locator('.pa-export__warnings li').allTextContents();
             assert(warnings.some(text => text.includes('current displayed')));
-            assert(!warnings.some(text => text.includes('thumbnail copies follow')), JSON.stringify(warnings));
+            assert(!warnings.some(text => text.includes('separate previews follow')), JSON.stringify(warnings));
             if (!mobile) assert(await page.evaluate(() => window.superblockExpected[1].x > window.superblockExpected[0].x + 50), 'desktop fixture must exercise side-by-side columns');
             assert(await page.evaluate(() => window.superblockPreserved), 'superblock columns must preserve the current responsive editor layout');
+            assert.deepEqual(fullPreviews, [], 'current-layout text/SQL export must not render a redundant full native preview');
             assert.deepEqual(writes, [], 'PDF generation/download must not upload a result');
             assert.deepEqual(await pdfFiles(), before, 'no generated PDF may remain in the kernel workspace');
             if (process.env.PENCIL_ARTIFACT_DIR) await download.saveAs(join(process.env.PENCIL_ARTIFACT_DIR, `${name}-sql-ink.pdf`));
@@ -479,18 +490,36 @@ try {
             const page = await context.newPage(); await openFixture(page, id, title, mobile);
             await page.evaluate(async () => {const {plugin,overlay}=window.inkFixture; overlay.store.addStroke('pen',{color:'#123456',width:4,opacity:1,simulate:false},[{x:70,y:70,p:.5}]);plugin.scheduleSave(overlay);await plugin.flushAll();});
             const original = JSON.parse(await readFile(file,'utf8'));
+            const directoryRequests = [];
+            page.on('request', request => {
+                const path = new URL(request.url()).pathname;
+                if (['/api/file/readDir', '/api/file/getFile'].includes(path)) {
+                    const body = request.postDataJSON();
+                    if (body?.path && (body.path === '/data/storage/petal/pencil-annotation' || body.path.startsWith('/data/storage/petal/pencil-annotation/'))) directoryRequests.push({path, file:body.path});
+                }
+            });
             const showList = async () => {
                 await page.locator('.pa-handle').click();
                 await page.getByRole('button',{name:'Drawing list',exact:true}).click();
                 await page.waitForFunction(()=>document.querySelector('.pa-drawings__status')?.textContent.includes('results'));
                 await page.getByPlaceholder('Search title, path or document ID').fill(title);
+                await page.waitForFunction(() => document.querySelectorAll('.pa-drawings__row').length === 1);
                 assert.equal(await page.locator('.pa-drawings__row').count(),1);
                 assert.equal(await page.locator('.pa-drawings').getByRole('button',{name:'Cancel',exact:true}).isVisible(),false);
                 assert.equal(await page.locator('.pa-drawings').getByRole('button',{name:'Show more',exact:true}).isVisible(),false);
                 assert.equal(await page.locator('.pa-toolbar').isVisible(),false);
             };
             await showList();
-            if(process.env.PENCIL_ARTIFACT_DIR) await page.screenshot({path:join(process.env.PENCIL_ARTIFACT_DIR,`${engine}-drawing-list.png`)});
+            assert(!directoryRequests.some(r => r.path === '/api/file/getFile' && !r.file.includes('/document-lifecycle/')), 'archive list must not download drawing JSON');
+            await page.evaluate(() => window.inkFixture.plugin.drawingList.destroy());
+            const warmRequests = directoryRequests.length;
+            await page.getByRole('button',{name:'Drawing list',exact:true}).click();
+            await page.waitForFunction(()=>document.querySelector('.pa-drawings__status')?.textContent.includes('results'));
+            await page.getByPlaceholder('Search title, path or document ID').fill(title);
+            await page.waitForFunction(()=>document.querySelectorAll('.pa-drawings__row').length===1);
+            assert.equal(directoryRequests.length, warmRequests, 'unchanged warm list reopen should use cached archives');
+            await page.locator('.pa-drawings__row [data-action="export"]').click({trial:true});
+            if(process.env.PENCIL_ARTIFACT_DIR) await page.screenshot({path:join(process.env.PENCIL_ARTIFACT_DIR,`${engine}-drawing-list.png`), animations:'disabled'});
             await page.locator('.pa-drawings__row [data-action="export"]').click();
             await page.waitForSelector('.pa-export'); await page.waitForSelector('.pa-drawings',{state:'detached'});
             await page.locator('[data-action="pdf"]').click();
@@ -510,7 +539,7 @@ try {
             await page.evaluate(async()=>{const {plugin,overlay}=window.inkFixture;overlay.store.addStroke('pen',{color:'#123456',width:4,opacity:1,simulate:false},[{x:50,y:50,p:.5}]);plugin.scheduleSave(overlay);await plugin.flushAll();});
             assert((await readdir(join(workspace,`data/storage/petal/pencil-annotation/sync-v2/${id}/g1`))).some(name=>name.startsWith('w')));
             await showList();
-            assert.match(await page.locator('.pa-drawings__detail').innerText(),/1 strokes/);
+            assert.match(await page.locator('.pa-drawings__detail').innerText(),/Handwriting archive available/);
             console.log(`SiYuan ${engine}: manager search/export/ink-only purge, unchanged note and fresh handwriting passed`);
         } catch(error) {
             for(const context of browser.contexts())for(const page of context.pages()){await page.screenshot({path:`/tmp/pencil-manager-failure-${engine}.png`});console.error((await page.locator('body').innerText()).slice(-1600));}

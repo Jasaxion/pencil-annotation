@@ -42,17 +42,23 @@ const distSqToSegment = (px: number, py: number, ax: number, ay: number, bx: num
     return dx * dx + dy * dy;
 };
 
-/**
- * True when the segment (x1,y1)-(x2,y2) passes within `threshold` doc px
- * of any sample of the stroke. Used by the eraser (segment sweep) and by
- * tap-selection (point input degenerates to a tiny segment).
- */
+/** Segment sweep fix adapted from upstream 6056a57 (MIT). */
+const distSqSegToSeg = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number, dx: number, dy: number): number => {
+    const d1 = (dx-cx)*(ay-cy)-(dy-cy)*(ax-cx), d2 = (dx-cx)*(by-cy)-(dy-cy)*(bx-cx);
+    const d3 = (bx-ax)*(cy-ay)-(by-ay)*(cx-ax), d4 = (bx-ax)*(dy-ay)-(by-ay)*(dx-ax);
+    if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return 0;
+    return Math.min(distSqToSegment(ax,ay,cx,cy,dx,dy), distSqToSegment(bx,by,cx,cy,dx,dy),
+        distSqToSegment(cx,cy,ax,ay,bx,by), distSqToSegment(dx,dy,ax,ay,bx,by));
+};
+
+/** True when the eraser sweep is within threshold of any stroke segment,
+ * including sparse lines, crossings and single-point dots. */
 export const segmentHitsStroke = (
     stroke: Stroke,
     x1: number, y1: number, x2: number, y2: number,
-    threshold: number,
+    threshold: number, bounds?: BBox,
 ): boolean => {
-    const bbox = strokeBBox(stroke);
+    const bbox = bounds ?? strokeBBox(stroke);
     const hitBox: BBox = {
         minX: Math.min(x1, x2) - threshold,
         minY: Math.min(y1, y2) - threshold,
@@ -61,21 +67,20 @@ export const segmentHitsStroke = (
     };
     if (!bboxesIntersect(bbox, hitBox)) return false;
 
-    // decimate long strokes for cheaper hit tests
-    const step = Math.max(1, Math.floor(stroke.points.length / 120));
-    const pts = stroke.points;
-    const thrSq = threshold * threshold;
-    for (let i = 0; i < pts.length - 1; i += step) {
-        const a = pts[i];
-        const b = pts[Math.min(i + step, pts.length - 1)];
-        if (distSqToSegment(a.x, a.y, x1, y1, x2, y2) <= thrSq ||
-            distSqToSegment(b.x, b.y, x1, y1, x2, y2) <= thrSq) return true;
+    const pts = stroke.points, thrSq = threshold * threshold;
+    if (pts.length === 1) return distSqToSegment(pts[0].x, pts[0].y, x1, y1, x2, y2) <= thrSq;
+    for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i], b = pts[i + 1];
+        // Reject distant segments cheaply before the exact distance calculation.
+        if (Math.max(a.x, b.x) < hitBox.minX || Math.min(a.x, b.x) > hitBox.maxX ||
+            Math.max(a.y, b.y) < hitBox.minY || Math.min(a.y, b.y) > hitBox.maxY) continue;
+        if (distSqSegToSeg(a.x, a.y, b.x, b.y, x1, y1, x2, y2) <= thrSq) return true;
     }
     return false;
 };
 
-export const pointHitsStroke = (stroke: Stroke, x: number, y: number, threshold: number): boolean =>
-    segmentHitsStroke(stroke, x, y, x + 0.01, y + 0.01, threshold);
+export const pointHitsStroke = (stroke: Stroke, x: number, y: number, threshold: number, bounds?: BBox): boolean =>
+    segmentHitsStroke(stroke, x, y, x, y, threshold, bounds);
 
 export const translateStroke = (stroke: Stroke, dx: number, dy: number) => {
     for (const p of stroke.points) {

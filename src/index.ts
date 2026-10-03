@@ -11,11 +11,11 @@ import {
 import {DocOverlay, type OverlayConfig, type OverlaySettings, type ProtyleLike} from "./overlay/overlay";
 import {Palette, type PaletteAction} from "./overlay/toolbar";
 import {TOPBAR_SVG} from "./overlay/icons";
-import {checkPublicationBudget, drawingCandidates, drawingGeneration, drawingSummary, kernelJSON, cleanupRetiredDocument, DocumentRetiredError, fenceDocument, loadPayload, planDocumentDeletion, reconcileLegacy as importLegacyInk, releasePayloadCache, retiredDocumentIds, retireDocumentGeneration, savePayload, settleDocumentWrites, validDocumentId} from "./plugin/api";
+import {checkPublicationBudget, drawingCandidates, drawingGeneration, drawingArchive, kernelJSON, cleanupRetiredDocument, DocumentRetiredError, fenceDocument, loadPayload, planDocumentDeletion, reconcileLegacy as importLegacyInk, releasePayloadCache, retiredDocumentIds, retireDocumentGeneration, savePayload, settleDocumentWrites, validDocumentId} from "./plugin/api";
 import {SyncCapacityError, SyncTransientError} from "./engine/sync";
 import {cancelExports, exportIsBusy, exportStrokesDialog} from "./plugin/exportDialog";
 import {showTextMessage as showMessage} from './plugin/text';
-import {drawingListDialog, type DrawingRow} from './plugin/drawingList';
+import {DrawingListCache, drawingListDialog, type DrawingRow} from './plugin/drawingList';
 import {
     DEFAULT_SETTINGS,
     loadSession,
@@ -35,6 +35,7 @@ export default class PencilAnnotationPlugin extends Plugin {
     private palette!: Palette;
     private activeOverlay: DocOverlay | null = null;
     private drawingList: Dialog | null = null;
+    private drawingCache = new DrawingListCache();
 
     private settings: PencilSettings = {...DEFAULT_SETTINGS};
     private overlaySettings!: OverlaySettings;
@@ -206,8 +207,9 @@ export default class PencilAnnotationPlugin extends Plugin {
      * Kernel pushed a data change: "sync" means another device merged new
      * strokes into this doc's payload — pull and merge them into open editors.
      */
-    async onDataChanged(reason?: string, checkLegacy = true) {
+    async onDataChanged(reason?: string, checkLegacy = true, refreshCatalogue = checkLegacy) {
         if (this.unloading || (reason !== "sync" && reason !== "overwrite")) return;
+        if (refreshCatalogue) this.drawingCache.invalidate();
         if (reason === "sync") void retiredDocumentIds(this).then(ids => { for (const id of ids) this.cleanupQueue.add(id); }).catch(() => {});
         this.syncAgain = true;
         this.syncCheckLegacy ||= checkLegacy;
@@ -232,6 +234,7 @@ export default class PencilAnnotationPlugin extends Plugin {
                             if (store.dirty) this.armSave(SAVE_DEBOUNCE);
                         }
                         if (store.mergeRemote(remote)) {
+                            this.drawingCache.invalidate(docId);
                             for (const overlay of this.overlays.values()) if (overlay.store === store) overlay.refreshFromStore();
                             this.refreshPalette();
                             showMessage(this.t(store.conflictCount ? "syncConflicts" : "syncMerged"));
@@ -256,6 +259,7 @@ export default class PencilAnnotationPlugin extends Plugin {
     }
 
     private retireStore(store: DocStore, reattach = false) {
+        this.drawingCache.invalidate(store.docId);
         const protyles: ProtyleLike[] = [];
         cancelExports(store.docId);
         for (const [key, view] of this.overlays) if (view.store === store) {
@@ -274,6 +278,7 @@ export default class PencilAnnotationPlugin extends Plugin {
     // Only successful kernel deletion events authorize retirement. Missing files,
     // closed notebooks and temporary sync gaps never enqueue a deletion.
     private onWsMain = ({detail}: {detail?: {cmd?: string; code?: number; data?: {ids?: unknown}}}) => {
+        if (!this.unloading && detail?.code === 0 && ['rename', 'movedoc', 'movedocs', 'renamenotebook', 'closenotebook', 'opennotebook'].includes(detail.cmd?.toLowerCase() ?? '')) this.drawingCache.invalidate(undefined, true);
         const ids = detail?.data?.ids;
         if (this.unloading || detail?.cmd !== "removeDoc" || detail.code !== 0 || !Array.isArray(ids) || ids.length > 50000 || !ids.every(validDocumentId)) return;
         for (const id of new Set<string>(ids)) {
@@ -295,6 +300,7 @@ export default class PencilAnnotationPlugin extends Plugin {
                     if (!accepted || this.unloading) { this.failedDeletions.delete(id); return; }
                 }
                 await retireDocumentGeneration(this, id, plan.generation, plan.confirm);
+                this.drawingCache.invalidate(id);
                 this.cleanupQueue.add(id);
                 if (store && store.generation <= plan.generation) this.retireStore(store);
                 await settleDocumentWrites(this, id);
@@ -487,17 +493,26 @@ export default class PencilAnnotationPlugin extends Plugin {
         const toolbarVisibility = this.palette.toolbar.style.visibility, handleVisibility = this.palette.handle.style.visibility;
         const restorePalette = () => { this.palette.toolbar.style.visibility = toolbarVisibility; this.palette.handle.style.visibility = handleVisibility; };
         this.palette.toolbar.style.visibility = this.palette.handle.style.visibility = 'hidden';
-        try { this.drawingList = drawingListDialog({t: this.t,
-            candidates: async signal => [...new Set([...await drawingCandidates(this, signal), ...[...this.documents.keys()].filter(validDocumentId)])],
-            inspect: async (id, signal) => {
+        try { this.drawingList = drawingListDialog({t: this.t, cache: this.drawingCache,
+            candidates: async signal => {
+                const candidates = new Map((await drawingCandidates(this, signal)).map(item => [item.id, item]));
+                for (const id of this.documents.keys()) if (validDocumentId(id) && !candidates.has(id)) candidates.set(id, {id, legacy: false});
+                return [...candidates.values()];
+            },
+            inspect: async (candidate, signal, previous, forceMetadata) => {
+                const metadataEpoch = this.drawingCache.metadataEpoch;
+                const archive = await drawingArchive(this, candidate, signal), id = candidate.id;
                 const local = this.documents.get(id);
-                const summary = await drawingSummary(this, id, signal, local?.loaded && !local.retiredDocument ? local.backup().payload : undefined);
-                const row: DrawingRow = {...summary, title: id, path: '', accessible: false, verified: true};
-                if (!summary.count) return row;
+                const pending = !!(local?.loaded && !local.retiredDocument && local.generation === archive.generation && (local.dirty || (!archive.archived && local.strokes.length > 0)));
+                const row: DrawingRow = {...archive, pending, title: id, path: '', accessible: false, verified: true, metadataAt: 0, metadataEpoch};
+                if (!archive.archived && !pending) return row;
+                if (!forceMetadata && previous?.accessible && previous.generation === row.generation && Date.now() - previous.metadataAt < 300000) {
+                    return {...row, title: previous.title, path: previous.path, accessible: true, metadataAt: previous.metadataAt};
+                }
                 try {
                     const info = await kernelJSON('/api/block/getDocInfo', {id}, signal);
                     if (info?.id !== id || info.rootID !== id) throw new Error('Invalid document metadata');
-                    row.title = String(info.name || id).slice(0, 500); row.accessible = true;
+                    row.title = String(info.name || id).slice(0, 500); row.accessible = true; row.metadataAt = Date.now();
                     try { const path = await kernelJSON('/api/filetree/getHPathByID', {id}, signal); if (typeof path === 'string') row.path = path.slice(0, 2048); } catch { /* title/id still searchable */ }
                 } catch { row.error = this.t('drawingUnavailable'); }
                 return row;
@@ -522,6 +537,7 @@ export default class PencilAnnotationPlugin extends Plugin {
             if (this.deletionJobs.has(id)) throw new Error(this.t('documentDeletionPending'));
             this.attachExisting();
             const view = [...this.overlays.values()].find(o => o.docId === id && o.protyle.element.isConnected && (o.protyle.wysiwyg?.element.clientWidth ?? 0) >= 50);
+            if (view && !view.store.loaded && !view.store.loading && view.store.blocked) throw new Error(view.store.blocked.message);
             if (view?.store.loaded) {
                 if (refreshed !== view.store) {
                     const payload = await loadPayload(this, id, true, signal);
@@ -553,6 +569,7 @@ export default class PencilAnnotationPlugin extends Plugin {
         if (window.siyuan?.config?.readonly || window.siyuan?.isPublish) throw new Error(this.t('drawingReadOnly'));
         if (this.unloading || !row.verified || !validDocumentId(id) || this.deletionJobs.has(id)) throw new Error(this.t('documentDeletionPending'));
         this.manualDeletions.add(id);
+        this.drawingCache.invalidate(id);
         const release = fenceDocument(this, id), store = this.documents.get(id);
         for (const view of this.overlays.values()) if (view.docId === id) view.setMode(false);
         store?.block('integrity', this.t('drawingWorking'));
@@ -574,7 +591,7 @@ export default class PencilAnnotationPlugin extends Plugin {
                 }
                 this.attachExisting();
                 for (const view of this.overlays.values()) if (view.docId === id) view.setMode(this.modeOn);
-                void this.onDataChanged('overwrite'); this.refreshPalette();
+                void this.onDataChanged('overwrite', true, false); this.refreshPalette();
             }
         });
         this.deletionJobs.set(id, job);
@@ -622,6 +639,7 @@ export default class PencilAnnotationPlugin extends Plugin {
 
     private scheduleSave(overlay: DocOverlay) {
         if (overlay.store.retiredDocument) return;
+        this.drawingCache.invalidate(overlay.docId);
         this.pendingSaves.add(overlay.store);
         this.saveRetries = 0;
         // Split views share one document, including undo and unsaved ink.
@@ -657,6 +675,7 @@ export default class PencilAnnotationPlugin extends Plugin {
                         break;
                     }
                     store.acknowledge(payload.snapshot.sequence);
+                    this.drawingCache.invalidate(store.docId);
                 } catch (e) {
                     if (store.retiredDocument || this.deletionJobs.has(store.docId)) break;
                     if (e instanceof DocumentRetiredError && e.generation > store.generation) { this.retireStore(store); break; }

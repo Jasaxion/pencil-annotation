@@ -171,7 +171,7 @@ try {
                 live.remove();
                 return {strictMapped, appendixAfterContent, strictInkRejected, parentInkSeparated, reportAfterInk, noDuplicateInsertion, ambiguousRejected,
                     emptyReported: empty.warnings.some(w => w.includes("empty")), nestedMapped: nestedMapped.warnings.some(w => w.includes("nested-embed")),
-                    inkWarning: best.warnings.some(w => w.includes("strokes")),
+                    inkWarning: best.warnings.some(w => w.includes("Some ink")),
                     unsupportedPlaceholder: unsupported.warnings.length > 0 && !window.pdfInjected,
                     missingReported: missing.warnings.some(w => w.includes("lost")), clean: !document.querySelector(".pa-pdf-host")};
             });
@@ -190,6 +190,11 @@ try {
                 const data = route.request().postDataJSON();
                 if (delay) await new Promise(r => setTimeout(r, 500));
                 await route.fulfill({json: {code: 0, data: {id: data.id, name: "Browser download", type: "NodeDocument", content: missingPreview ? "" : text, attrs: {}}}}).catch(() => {});
+            });
+            await page.route('**/api/block/getDocInfo', async route => {
+                const data = route.request().postDataJSON();
+                if (delay) await new Promise(r => setTimeout(r, 500));
+                await route.fulfill({json:{code:0,data:{id:data.id,rootID:data.id,name:'Browser download',ial:{}}}}).catch(() => {});
             });
             const showDialog = () => page.evaluate(async () => {
                 const h = window.harness, {exportStrokesDialog} = await import("/src/plugin/exportDialog.ts");

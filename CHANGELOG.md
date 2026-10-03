@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1 (2026-10-03)
+
+- Change Drawing list into a current-generation archive directory. Inspect filenames and small lifecycle records, not full migration/writer payloads; remove stroke totals. Empty/cleared archives remain listed, retired generations do not, and unsaved session changes remain distinguishable.
+- Cache archive results for 30 seconds and accessible title/path metadata for five minutes within the plugin session. Warm unchanged reopens make no requests; local changes recheck affected archives, sync/name/notebook changes invalidate appropriate caches, and Refresh forces a fresh check. Bound metadata concurrency to four and coalesce UI updates.
+- Avoid a redundant full native preview for current-layout text/SQL PDF exports; retain native resource preparation when file/network images need it. Reuse parsed source structure, skip unnecessary canonical hashing for byte-identical source checks, and take one ink snapshot after module preparation. Remove stroke-number reporting and use stride sampling for fallback previews.
+- Selectively adapt upstream `6056a57` (through `d590d3e`): exact segment-to-segment eraser/selection tests, including sparse strokes and dots. Reuse cached bounds and one block-offset resolver per input batch, reject distant segments early and skip exact within-batch duplicate eraser samples.
+- Generate expensive stroke outlines only after viewport rejection, reuse bounds for selection/erasure, defer selection snapshots until actual movement, and skip no-op live redraws. Adapt the live-frame fallback idea from upstream `5ecf02f`, with cancellation and stale-callback protection.
+- Preserve the existing freehand renderer, pressure appearance, shape recognition and native wheel path. Upstream post-lift/retroactive snapping, global smoothing/width changes and capture-layer wheel routing were deliberately not merged into this stable-input patch.
+- Add deterministic request-count/zero-point-data, cache invalidation, unchanged-pixel, lazy-path, eraser/undo and stalled-rAF regressions. Revalidate real temporary SiYuan 3.8.6 desktop/mobile GUI, full PDF with image resources, sync/deletion and archive-only cleanup behavior.
+
 ## 0.4.0 (2026-10-03)
 
 - Add default current-visual-layout PDF export using the complete kernel source, preserving superblock structure and current displayed SQL instances. Resolve ink against witnessed current occurrences instead of routing the whole document to an appendix; check dimensions/content and retain per-stroke fallback for unresolved regions. Saved stroke data is not rewritten.

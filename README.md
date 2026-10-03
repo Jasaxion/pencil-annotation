@@ -17,7 +17,7 @@ Handwrite on SiYuan documents with **Apple Pencil / Android pens / drawing table
 - **Pen-tip double-tap** — optionally tap the page twice to switch pen ↔ eraser. Off by default to avoid mistaking punctuation for a gesture; existing explicit preferences are preserved. This is not the pen's barrel gesture.
 - **Floating toolbar** — draggable handle + palette with position memory. Hide the handle in settings; desktop top-bar/command entry remains available, and mobile users can restore it in plugin settings. The toolbar wraps on narrow screens.
 - **Export** — full-note image-based PDF with handwriting and browser download; handwriting-only PNG save/insert; raw JSON backup including unsaved local changes.
-- **Drawing list** — search notes containing ink, open/export them or permanently delete only their handwriting; available from settings and the toolbar.
+- **Drawing list** — browse handwriting archives without stroke totals, open/export them or permanently delete only their handwriting; available from settings and the toolbar.
 - **English & Simplified Chinese UI**.
 
 ## Storage & multi-device sync
@@ -52,7 +52,7 @@ Version 0.3.0 keeps the existing private directory, but independent browsers no 
 
 ### Upgrade and recovery
 
-1. Back up the entire `data/storage/petal/pencil-annotation/` directory, install **0.4.0**, restart SiYuan and refresh all browser/PWA clients. Existing storage/coordinates are retained; do not mix editing pages that still cache old scripts.
+1. Back up the entire `data/storage/petal/pencil-annotation/` directory, install **0.4.1**, restart SiYuan and refresh all browser/PWA clients. Existing storage/coordinates are retained; do not mix editing pages that still cache old scripts.
 2. Do not mix editing versions. Old clients cannot read subsequent v2 changes; replacing the script with an old version is not a data rollback.
 3. If an old client changes the legacy file, editing/saving pauses. After refreshing old clients, use **Merge legacy handwriting** in Export: it preserves the old file and adds new/changed values, never interprets absence as deletion, and keeps conflicts. This action cannot reimport retired data from a deleted document.
 4. For capacity/integrity errors, keep the page open. Undo unsent changes or download a JSON backup from Export. That backup covers loaded state and local changes, not unobserved remote data. If initial loading fails, preserve the complete server-side directory first.
@@ -61,10 +61,13 @@ File, aggregate-document, session and retirement limits are defined in `src/engi
 
 A save confirms local-kernel write/read-back, not delivery to every separate workspace. Failed writes are retained and retried a bounded number of times. Unacknowledged changes can still be lost on process kill, power failure or offline shutdown.
 
-## Drawing list (0.4.0)
+## Drawing list (lightweight archive directory)
 
 - Open it from the **toolbar list icon**, **plugin settings → Drawing list**, or the plugin command. One compact native dialog serves desktop and mobile.
-- Progressively inspect private handwriting storage, show live stroke counts, and search scanned titles/paths/IDs. Refresh, stop scanning or show more results. No persistent catalogue or whole-workspace note-content scan is created.
+- List **current-generation archive files**, without downloading stroke points, migration bases or cumulative snapshots to count ink. Cleared/empty archives remain listed; retired generations and deletion-marker-only directories do not. Unsaved session changes are labelled separately.
+- Cache the directory for 30 seconds and accessible title/path metadata for five minutes within the plugin session. Unchanged warm reopens make no requests. Local changes recheck affected archives; sync and name/notebook changes invalidate relevant caches. Refresh forces a check. These are display hints only: destructive/export actions validate current state again.
+- Search title/path/ID, show more results, cancel checks and overlap at most four lightweight requests with coalesced UI updates. No persistent index or whole-note-library content scan is created. First open after restart, large directories and slow networks still take time, but listing no longer reads complete ink payloads.
+- An available archive means its file exists, not that its contents are healthy; opening/exporting still reads and validates the required data.
 - **Open** navigates to the note. **Export** opens the matching note and reuses the PDF/PNG/JSON dialog. Closing the manager cancels pending export preparation instead of showing a late popup.
 - **Delete ink permanently retires only the selected handwriting generation, never the note body.** Confirmation is required; stale rows/approvals cannot delete a newer generation. New handwriting remains possible in the same note. Already-confirmed cleanup finishes safely even if the window closes; history/downloaded backups and necessary retirement markers remain outside physical erasure.
 - Closed/locked notebooks, unavailable metadata or corrupt data are labelled, not treated as automatic deletion. Read-only access cannot delete ink. Large collections may take time to scan; discovered results remain usable and scanning is cancellable.
@@ -77,7 +80,7 @@ A save confirms local-kernel write/read-back, not delivery to every separate wor
 - The optional **SiYuan static preview** retains the previous export path. References may become footnotes and layout can change; this fallback remains more conservative about old SQL ink. Choose the default current layout to reproduce the page you presently see.
 - Current body width/typography produce fixed-A4 **image PDFs**, not searchable/selectable text. Current positioning is neither historical recovery nor character-level anchoring; check complex layouts after export. Individual fallback previews are bounded; keep the note/JSON backup for full data.
 - One cancellable job at a time with page-sized canvases released as work proceeds. Compatibility notes follow content and legitimate below-document handwriting.
-- On-demand `pdf.js` generates and downloads the PDF in the browser, **without uploading a generated PDF**. The kernel may still prepare/cache referenced resources. PNG-to-assets is a separate, explicit upload action.
+- On-demand `pdf.js` generates and downloads the PDF in the browser, **without uploading a generated PDF**. Current-layout text/SQL exports use lightweight metadata instead of a redundant full native render. File/network images retain native resource preparation. Necessary drawing, validation and page progress remain; stroke totals are no longer reported. PNG-to-assets remains a separate explicit upload action.
 - Local temporary **SiYuan 3.8.6** Chromium/WebKit tests cover responsive superblocks, duplicate SQL occurrences with ink on the note, complete long documents, the manager and unchanged note files after ink deletion. No real user notes, Docker containers or separate-workspace cloud-sync runs were used.
 
 ## Install (dev build)
@@ -122,7 +125,7 @@ SIYUAN_KERNEL=/path/to/SiYuan-Kernel npm run test:host  # optional real-host che
 npm run pack
 ```
 
-`test/current-pdf.mjs` checks current occurrences, superblocks, ink pixels, individual fallback and safe content. `test/drawing-list.mjs` checks the manager, readonly scans, cancellation, ink-only deletion, stale approvals and slow writes. Existing sync, deletion, input and native-preview/download suites remain in place. `test:host` exercises the real temporary SiYuan GUI and compares note files before/after manager deletion. Existing user notes are not opened.
+`test/performance.mjs` checks exact segment/dot hits, batched offsets, lazy offscreen outlines, unchanged pixels, deferred selection snapshots and stalled-frame fallback. `test/drawing-list.mjs` measures zero stroke-JSON reads during archive checks, zero-request warm reopen, targeted invalidation and safe cleanup. `test/current-pdf.mjs` covers current layout, pixels, safe content and omitted redundant previews. Existing sync/deletion/input/native-preview suites remain enabled. The temporary-kernel host suite validates the actual GUI, image resources, PDFs and unchanged note files after ink cleanup.
 
 Browser/mobile-viewport automation is **not physical Android/iPad or installed-PWA certification**. Hardware pressure, OS palm rejection and interruptions still need device checks; WebKit pen injection in the tests uses synthetic events.
 
@@ -132,6 +135,10 @@ Browser/mobile-viewport automation is **not physical Android/iPad or installed-P
 - No layers, no lasso multi-select, no pixel eraser (planned).
 - Undo history is per-session and resets when the document closes (strokes themselves persist).
 - Very long documents use a viewport canvas with culling; thousands of strokes may need tile caching for smoother scrolling.
+
+## Upstream adoption
+
+Reviewed upstream `d590d3e` (its 0.3.0). Selectively adapted `6056a57` segment/dot hit testing, `a1ac9dc` batch-reuse ideas and `5ecf02f` stalled-frame fallback. Added lazy offscreen outlines and selection snapshots only on movement in this fork. No whole-branch merge or global smoothing, width-rendering or post-lift/retroactive snapping changes were applied. Native wheel handling and continuous pen-down recovery already work here and are not intercepted again.
 
 ## License
 

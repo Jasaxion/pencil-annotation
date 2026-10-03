@@ -1,26 +1,56 @@
 import {confirm, Dialog} from 'siyuan';
 import {escapeText} from './text';
-import type {DrawingSummary} from './api';
-export interface DrawingRow extends DrawingSummary {title: string; path: string; accessible: boolean; error?: string; verified: boolean}
+import type {DrawingArchive, DrawingCandidate} from './api';
+export interface DrawingRow extends DrawingArchive {title: string; path: string; accessible: boolean; pending: boolean; error?: string; verified: boolean; metadataAt: number; metadataEpoch: number}
+export class DrawingListCache {
+    rows = new Map<string, DrawingRow>();
+    candidates = new Map<string, DrawingCandidate>();
+    dirty = new Set<string>();
+    revisions = new Map<string, number>();
+    checkedAt = 0;
+    full = true;
+    epoch = 0;
+    metadataEpoch = 0;
+    notify: (() => void) | null = null;
+    invalidate(id?: string, metadata = false) {
+        if (id) { this.dirty.add(id); this.revisions.set(id, (this.revisions.get(id) ?? 0) + 1); }
+        else { this.full = true; this.epoch++; }
+        if (metadata) this.metadataEpoch++;
+        this.notify?.();
+    }
+}
+const CACHE_MS = 30000;
 interface ListOptions {
     t: (key: string, vars?: Record<string, string>) => string;
-    candidates: (signal: AbortSignal) => Promise<string[]>;
-    inspect: (id: string, signal: AbortSignal) => Promise<DrawingRow>;
+    cache: DrawingListCache;
+    candidates: (signal: AbortSignal) => Promise<DrawingCandidate[]>;
+    inspect: (candidate: DrawingCandidate, signal: AbortSignal, previous: DrawingRow | undefined, forceMetadata: boolean) => Promise<DrawingRow>;
     open: (id: string, exportDocument: boolean, signal: AbortSignal) => Promise<void>;
     remove: (row: DrawingRow) => Promise<void>;
     canDelete: () => boolean;
     onClose: () => void;
 }
 
-/** Native dialog + progressive read-only discovery. No durable catalogue/index. */
+/** Session-cached archive directory. Never counts or retains stroke geometry. */
 export function drawingListDialog(options: ListOptions): Dialog {
-    const {t} = options;
+    const {t, cache} = options;
     let disposed = false, controller: AbortController | null = null, scanning = false, busy = false, limit = 50;
+    let renderFrame: number | null = null, updateTimer: number | null = null;
     let actionController: AbortController | null = null;
     let checked = 0, total = 0, message = '';
-    const rows = new Map<string, DrawingRow>();
+    const rows = cache.rows;
+    const changed = () => {
+        if (disposed || busy || scanning || updateTimer !== null) return;
+        updateTimer = window.setTimeout(() => { updateTimer = null; if (!disposed && !busy && !scanning) void scan(); }, 250);
+    };
     const dialog = new Dialog({title: t('drawingList'), width: 'min(780px, calc(100vw - 24px))',
-        content: '<div class="pa-drawings"></div>', destroyCallback: () => { disposed = true; controller?.abort(); actionController?.abort(); options.onClose(); }});
+        content: '<div class="pa-drawings"></div>', destroyCallback: () => {
+            disposed = true; controller?.abort(); actionController?.abort();
+            if (renderFrame !== null) cancelAnimationFrame(renderFrame);
+            if (updateTimer !== null) clearTimeout(updateTimer);
+            if (cache.notify === changed) cache.notify = null;
+            options.onClose();
+        }});
     const root = dialog.element.querySelector<HTMLElement>('.pa-drawings')!;
     const tools = document.createElement('div'); tools.className = 'pa-drawings__tools';
     const search = document.createElement('input'); search.type = 'search'; search.className = 'b3-text-field';
@@ -29,7 +59,7 @@ export function drawingListDialog(options: ListOptions): Dialog {
         const el = document.createElement('button'); el.type = 'button'; el.className = 'b3-button b3-button--outline';
         if (danger) el.classList.add('pa-drawings__danger'); el.textContent = text; el.addEventListener('click', action); return el;
     };
-    const refresh = button(t('drawingRefresh'), () => void scan());
+    const refresh = button(t('drawingRefresh'), () => void scan(true));
     const stop = button(t('exportCancel'), () => { controller?.abort(); message = t('drawingScanStopped'); render(); });
     tools.append(search, refresh, stop);
     const status = document.createElement('p'); status.className = 'pa-drawings__status'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
@@ -37,11 +67,13 @@ export function drawingListDialog(options: ListOptions): Dialog {
     const list = document.createElement('div'); list.className = 'pa-drawings__rows';
     const more = button(t('drawingShowMore'), () => { limit += 50; render(); }); more.classList.add('pa-drawings__more');
     root.append(tools, status, note, list, more);
+    cache.notify = changed;
     function render() {
         if (disposed) return;
+        if (renderFrame !== null) { cancelAnimationFrame(renderFrame); renderFrame = null; }
         refresh.disabled = busy; stop.hidden = !scanning; stop.disabled = busy;
         const query = search.value.trim().toLocaleLowerCase();
-        const filtered = [...rows.values()].filter(row => [row.title, row.path, row.id].some(s => s.toLocaleLowerCase().includes(query)))
+        const filtered = [...rows.values()].filter(row => row.archived || row.pending || !row.verified).filter(row => [row.title, row.path, row.id].some(s => s.toLocaleLowerCase().includes(query)))
             .sort((a, b) => Number(b.accessible) - Number(a.accessible) || Number(b.verified) - Number(a.verified) || a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
         status.textContent = message || (scanning ? t('drawingScanning', {done: String(checked), total: String(total)}) : t('drawingFound', {count: String(filtered.length)}));
         const focused = list.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
@@ -55,7 +87,7 @@ export function drawingListDialog(options: ListOptions): Dialog {
             title.className = 'pa-drawings__title'; title.dataset.action = 'title'; title.disabled = busy || !row.accessible;
             const path = document.createElement('div'); path.className = 'pa-drawings__path'; path.textContent = row.path || row.id; path.title = row.path || row.id;
             const detail = document.createElement('div'); detail.className = 'pa-drawings__detail';
-            detail.textContent = row.error || t('drawingStrokeCount', {count: String(row.count)});
+            detail.textContent = row.error || t(row.pending ? 'drawingPending' : 'drawingArchive');
             if (row.error) detail.classList.add('pa-drawings__error');
             main.append(title, path, detail);
             const actions = document.createElement('div'); actions.className = 'pa-drawings__actions';
@@ -69,7 +101,7 @@ export function drawingListDialog(options: ListOptions): Dialog {
                 confirm(t('drawingDeleteTitle'), t('drawingDeleteConfirm', {name: escapeText(row.title), id: row.id}), () => {
                     if (disposed) return;
                     busy = false;
-                    void run(async () => { await options.remove(row); await scan(); });
+                    void run(async () => { await options.remove(row); cache.invalidate(row.id); await scan(); });
                 }, () => { busy = false; render(); });
             }, true);
             remove.dataset.action = 'delete';
@@ -88,29 +120,66 @@ export function drawingListDialog(options: ListOptions): Dialog {
         catch (error) { message = t('drawingActionFailed', {msg: String((error as Error)?.message || error)}); }
         finally { busy = false; render(); }
     }
-    // ponytail: sequential, cancellable scans with 50 visible rows; introduce
-    // reusable summaries only if large collections show measured scan latency.
-    async function scan() {
-        if (disposed) return;
-        controller?.abort(); const current = new AbortController(); controller = current;
-        scanning = true; checked = 0; total = 0; message = ''; rows.clear(); limit = 50; render();
-        try {
-            const ids = await options.candidates(current.signal); total = ids.length; render();
-            for (const id of ids) {
-                if (current.signal.aborted || disposed) break;
-                try {
-                    const row = await options.inspect(id, current.signal);
-                    if (!current.signal.aborted && !disposed && (row.count > 0 || !row.verified)) rows.set(id, row);
-                } catch (error) {
-                    if (!current.signal.aborted && !disposed) rows.set(id, {id, title: id, path: '', generation: 0, count: 0, accessible: false, verified: false, error: t('drawingReadFailed')});
-                }
-                if (current.signal.aborted || controller !== current || disposed) break;
-                checked++; render();
-            }
-        } catch (error) { if (!current.signal.aborted) message = t('drawingActionFailed', {msg: String((error as Error)?.message || error)}); }
-        finally { if (controller === current) { scanning = false; render(); } }
+    function requestRender() {
+        if (disposed || renderFrame !== null) return;
+        renderFrame = requestAnimationFrame(() => { renderFrame = null; render(); });
     }
-    search.addEventListener('input', () => { limit = 50; render(); });
+    // Cache is only a UI hint. Actions recheck generations and data independently.
+    // A small worker pool overlaps metadata latency without loading stroke files.
+    async function scan(force = false, followup = false) {
+        if (disposed) return;
+        if (updateTimer !== null) { clearTimeout(updateTimer); updateTimer = null; }
+        if (!force && !cache.full && cache.checkedAt && Date.now() - cache.checkedAt < CACHE_MS && !cache.dirty.size) { render(); return; }
+        if (force) { cache.full = true; cache.epoch++; cache.metadataEpoch++; }
+        controller?.abort(); const current = new AbortController(); controller = current;
+        const full = cache.full || !cache.checkedAt || Date.now() - cache.checkedAt >= CACHE_MS;
+        const epoch = cache.epoch, metadataEpoch = cache.metadataEpoch;
+        const pending = new Set(cache.dirty); pending.forEach(id => cache.dirty.delete(id));
+        scanning = true; checked = 0; total = 0; message = ''; render();
+        let complete = false;
+        try {
+            let candidates: DrawingCandidate[];
+            if (full) {
+                candidates = await options.candidates(current.signal);
+                if (current.signal.aborted || disposed) return;
+                cache.candidates = new Map(candidates.map(item => [item.id, item]));
+            } else candidates = [...pending].map(id => cache.candidates.get(id) ?? {id, legacy: false});
+            const seen = new Set(candidates.map(item => item.id));
+            total = candidates.length; requestRender();
+            let cursor = 0;
+            const work = async () => {
+                while (!current.signal.aborted && !disposed && cursor < candidates.length) {
+                    const candidate = candidates[cursor++], id = candidate.id;
+                    const revision = cache.revisions.get(id) ?? 0, previous = rows.get(id);
+                    let row: DrawingRow;
+                    try { row = await options.inspect(candidate, current.signal, previous, force || previous?.metadataEpoch !== metadataEpoch); }
+                    catch {
+                        row = {id, title: previous?.title ?? id, path: previous?.path ?? '', generation: previous?.generation ?? 0,
+                            archived: previous?.archived ?? false, pending: false, accessible: false, verified: false, metadataAt: 0, metadataEpoch,
+                            error: t('drawingReadFailed')};
+                    }
+                    if (current.signal.aborted || disposed) return;
+                    if ((cache.revisions.get(id) ?? 0) === revision) rows.set(id, row);
+                    checked++; requestRender();
+                }
+            };
+            await Promise.all(Array.from({length: Math.min(4, candidates.length)}, () => work()));
+            if (current.signal.aborted || disposed) return;
+            if (full && cache.epoch === epoch) {
+                for (const id of rows.keys()) if (!seen.has(id) && !cache.dirty.has(id)) rows.delete(id);
+                cache.checkedAt = Date.now(); cache.full = false;
+            }
+            complete = true;
+        } catch (error) { if (!current.signal.aborted) message = t('drawingActionFailed', {msg: String((error as Error)?.message || error)}); }
+        finally {
+            if (!complete) { if (full) cache.full = true; pending.forEach(id => cache.dirty.add(id)); }
+            if (controller === current) {
+                scanning = false; render();
+                if (complete && !followup && (cache.dirty.size || cache.full)) void scan(false, true);
+            }
+        }
+    }
+    search.addEventListener('input', () => { limit = 50; requestRender(); });
     void scan(); queueMicrotask(() => { if (!disposed) search.focus(); });
     return dialog;
 }

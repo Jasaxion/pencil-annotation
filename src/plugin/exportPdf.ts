@@ -44,15 +44,22 @@ async function boundedWait(promise: Promise<unknown>, signal: AbortSignal, label
 function fragment(html: string): DocumentFragment {
     const template = document.createElement("template"); template.innerHTML = html; return template.content;
 }
-function documentFingerprint(html: string): string {
-    const root = fragment(html), walker = document.createTreeWalker(root, NodeFilter.SHOW_ALL);
-    const tokens: unknown[] = [];
+function documentFingerprint(root: Node, hash = true): string {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ALL);
+    const tokens: unknown[] = []; let count = 0;
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-        if (tokens.length > 200000) throw new Error("Document is too large to verify safely");
+        if (++count > 200000) throw new Error("Document is too large to verify safely");
+        if (!hash) continue;
         const attributes = node instanceof Element ? [...node.attributes].map(a => [a.name, a.value]).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0) : [];
         tokens.push([node.nodeType, node.nodeName, node.nodeValue, node.childNodes.length, attributes]);
     }
-    return fingerprint(tokens);
+    return hash ? fingerprint(tokens) : '';
+}
+function needsAssetPreparation(root: ParentNode): boolean {
+    return [...root.querySelectorAll('img')].some(image => {
+        const src = image.getAttribute('data-src') || image.getAttribute('src') || '';
+        return src !== '' && !/^(data:|blob:)/i.test(src);
+    });
 }
 function blockIds(root: ParentNode): Set<string> {
     return new Set([...root.querySelectorAll<HTMLElement>("[data-node-id]")].map(el => el.dataset.nodeId!));
@@ -159,13 +166,27 @@ export async function buildNotePdfBlob(input: PdfInput, options: PdfOptions): Pr
         ...(s.anchor ? {anchor: {...s.anchor}} : {})}));
     const current = options.layout !== "native" ? captureCurrentLayout(input.source, strokes) : null;
     options.onProgress?.("prepare", 0, 0);
-    const source = await request("/api/block/getBlockDOM", {id: input.docId}, signal);
-    const preview = await request("/api/export/exportPreviewHTML", {id: input.docId, image: true, keepFold: false, merge: false, addTitle: false, keepJSEmbed: false}, signal);
-    const after = await request("/api/block/getBlockDOM", {id: input.docId}, signal);
-    if (source?.id !== input.docId || after?.id !== input.docId || typeof source.dom !== "string" ||
-        typeof preview?.content !== "string" || preview.id !== input.docId || preview.type !== "NodeDocument") throw new Error("Invalid full-document export response");
-    if (documentFingerprint(source.dom) !== documentFingerprint(after.dom)) throw new Error("The document changed during export preparation; retry when editing stops");
-    const sourceDOM = fragment(source.dom), expected = blockIds(sourceDOM), html = fragment(current ? source.dom : preview.content);
+    const previewRequest = {id: input.docId, image: true, keepFold: false, merge: false, addTitle: false, keepJSEmbed: false};
+    const [source, metadata] = await Promise.all([
+        request('/api/block/getBlockDOM', {id: input.docId}, signal),
+        current ? request('/api/block/getDocInfo', {id: input.docId}, signal) : request('/api/export/exportPreviewHTML', previewRequest, signal),
+    ]);
+    if (source?.id !== input.docId || typeof source.dom !== 'string') throw new Error('Invalid full-document source');
+    if (current ? metadata?.id !== input.docId || metadata.rootID !== input.docId
+        : typeof metadata?.content !== 'string' || metadata.id !== input.docId || metadata.type !== 'NodeDocument') throw new Error('Invalid document metadata/preview');
+    const sourceDOM = fragment(source.dom);
+    // Text/SQL-only current-layout exports need no redundant full native render.
+    // Keep native resource preparation for file/network images to retain host compatibility.
+    if (current && (needsAssetPreparation(sourceDOM) || needsAssetPreparation(current.live))) {
+        const prepared = await request('/api/export/exportPreviewHTML', previewRequest, signal);
+        if (prepared?.id !== input.docId || prepared.type !== 'NodeDocument') throw new Error('Invalid export resource preparation');
+    }
+    const after = await request('/api/block/getBlockDOM', {id: input.docId}, signal);
+    if (after?.id !== input.docId || typeof after.dom !== 'string') throw new Error('Invalid source verification');
+    if (source.dom === after.dom) documentFingerprint(sourceDOM, false);
+    else if (documentFingerprint(sourceDOM) !== documentFingerprint(fragment(after.dom))) throw new Error('The document changed during export preparation; retry when editing stops');
+    const preview = current ? {id: input.docId, type: 'NodeDocument', name: metadata.name, attrs: metadata.ial ?? {}} : metadata;
+    const expected = blockIds(sourceDOM), html = current ? sourceDOM.cloneNode(true) as DocumentFragment : fragment(preview.content);
     html.querySelectorAll('a[href^="pdf-outline://"]').forEach(link => link.remove());
     html.querySelector(`[data-node-id="${CSS.escape(input.docId)}"][data-type="NodeHeading"]`)?.remove();
     if (current) await prepareCurrentLayout(html, current, input.docId, request, signal, state);

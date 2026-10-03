@@ -1,7 +1,7 @@
 import type {Plugin} from "siyuan";
 import {showTextMessage as showMessage} from './text';
 import type {PencilPayload} from "../engine/types";
-import {baseValues, fingerprint, makeBase, safeId, validateBase, validateLegacy, validateSnapshot,
+import {fingerprint, makeBase, safeId, validateBase, validateLegacy, validateSnapshot,
     MAX_FILE_BYTES, MAX_DOCUMENT_BYTES, MAX_FILES, MAX_WRITERS, MAX_BASES, snapshotCovers, SyncCapacityError, SyncIntegrityError, SyncTransientError,
     type Publication, type SyncBase, type SyncPayload, type WriterSnapshot} from "../engine/sync";
 
@@ -230,7 +230,7 @@ export async function cleanupRetiredDocument(plugin: Plugin, docId: string) {
     const parent = `/data/storage/petal/${plugin.name}`, root = syncDirectory(plugin, docId);
     const docEntry = (await readDir(`${parent}/sync-v2`, MAX_REGISTRY_ENTRIES)).find(f => f.name === docId);
     if (docEntry && (!docEntry.isDir || docEntry.isSymlink)) throw new SyncIntegrityError("Unexpected document storage path; cleanup refused");
-    const files = await readDir(root), paths: string[] = [];
+    const files = await readDir(root, MAX_REGISTRY_ENTRIES), paths: string[] = [];
     for (const file of files) {
         if (file.isSymlink) throw new SyncIntegrityError("Cleanup refused a symlink");
         if (file.name === "retired-v1.json" && !file.isDir) continue;
@@ -514,43 +514,39 @@ export async function drawingGeneration(plugin: Plugin, docId: string): Promise<
     if (!validDocumentId(docId)) throw new SyncIntegrityError('Invalid drawing document ID');
     return (await readLifecycle(plugin, docId)).generation;
 }
-export interface DrawingSummary {id: string; generation: number; count: number}
-export async function drawingCandidates(plugin: Plugin, signal: AbortSignal): Promise<string[]> {
+export interface DrawingCandidate {id: string; legacy: boolean}
+export interface DrawingArchive {id: string; generation: number; archived: boolean}
+export async function drawingCandidates(plugin: Plugin, signal: AbortSignal): Promise<DrawingCandidate[]> {
     const parent = `/data/storage/petal/${plugin.name}`;
     syncDirectory(plugin, 'catalog');
-    const ids = new Set<string>();
+    const candidates = new Map<string, DrawingCandidate>();
     for (const entry of await readDir(parent, MAX_REGISTRY_ENTRIES, signal)) {
         const id = entry.name.endsWith('.json') ? entry.name.slice(0, -5) : '';
-        if (!entry.isDir && !entry.isSymlink && validDocumentId(id)) ids.add(id);
+        if (!entry.isDir && !entry.isSymlink && validDocumentId(id)) candidates.set(id, {id, legacy: true});
     }
     for (const entry of await readDir(`${parent}/sync-v2`, MAX_REGISTRY_ENTRIES, signal)) {
-        if (entry.isDir && !entry.isSymlink && validDocumentId(entry.name)) ids.add(entry.name);
+        if (entry.isDir && !entry.isSymlink && validDocumentId(entry.name) && !candidates.has(entry.name)) candidates.set(entry.name, {id: entry.name, legacy: false});
     }
-    return [...ids].sort();
+    return [...candidates.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
-/** A catalogue read must not register a restored lifetime, change a live store,
- * or treat unavailable document metadata as proof of deletion. */
-export async function drawingSummary(plugin: Plugin, docId: string, signal: AbortSignal, local?: SyncPayload): Promise<DrawingSummary> {
-    if (!validDocumentId(docId)) throw new SyncIntegrityError('Invalid drawing document ID');
-    const epoch = operationEpoch(plugin, docId), life = await readLifecycle(plugin, docId, signal);
-    const payload = await loadPayloadData(plugin, docId, newReadCache(life.generation), true, false, signal);
-    assertOperation(plugin, docId, epoch);
-    if ((await readLifecycle(plugin, docId, signal)).generation !== life.generation) throw new SyncTransientError('Drawing changed during catalogue scan; refresh');
-    if (signal.aborted) throw new DOMException('Cancelled', 'AbortError');
-    const sources = [payload];
-    if (local && local.docId === docId && (local.generation ?? 0) === life.generation) sources.push(local);
-    const bases = new Map<string, SyncBase>(), snapshots = new Map<string, WriterSnapshot>(), retired = new Set<string>();
-    for (const source of sources) {
-        source.bases.forEach(base => bases.set(base.hash, base));
-        for (const snapshot of source.snapshots) {
-            snapshot.retired.forEach(id => retired.add(id));
-            if ((snapshots.get(snapshot.writer)?.sequence ?? 0) <= snapshot.sequence) snapshots.set(snapshot.writer, snapshot);
-        }
+/** Presence, not visible-stroke counting: never download migration bases or
+ * writer JSON just to list an archive. A cleared drawing can still have an archive.
+ * Cached/listed generations are hints only; destructive actions recheck them. */
+export async function drawingArchive(plugin: Plugin, candidate: DrawingCandidate, signal: AbortSignal): Promise<DrawingArchive> {
+    const {id} = candidate;
+    if (!validDocumentId(id)) throw new SyncIntegrityError('Invalid drawing document ID');
+    const epoch = operationEpoch(plugin, id), {generation} = await readLifecycle(plugin, id, signal);
+    const files = await readDir(syncDirectory(plugin, id, generation), MAX_REGISTRY_ENTRIES, signal);
+    let archived = generation === 0 && candidate.legacy;
+    for (const file of files) {
+        if (file.name === 'retired-v1.json' && generation === 0) throw new SyncTransientError('Archive retirement metadata is still synchronizing');
+        if (file.isDir || file.isSymlink) throw new SyncIntegrityError('Unrecognized archive directory; files were preserved');
+        if (snapshotName.test(file.name) || baseName.test(file.name)) archived = true;
+        else if (file.name.endsWith('.json')) throw new SyncIntegrityError('Unrecognized archive file; files were preserved');
     }
-    const values = new Set<string>();
-    for (const base of bases.values()) for (const value of baseValues(base)) if (!retired.has(value.revision)) values.add(value.revision);
-    for (const snapshot of snapshots.values()) for (const value of snapshot.values) if (!retired.has(value.revision)) values.add(value.revision);
-    return {id: docId, generation: life.generation, count: values.size};
+    assertOperation(plugin, id, epoch);
+    if (signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+    return {id, generation, archived};
 }
 
 /** Upload a PNG to workspace assets; PDF uses the browser download path instead. */

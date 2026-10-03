@@ -31,9 +31,10 @@ try {
                 add(seeded); const pub = seeded.serialize();
                 for (const base of pub.bases) files.set(`${parent}/sync-v2/${b}/g1/base-${base.hash}.json`, base);
                 files.set(`${parent}/sync-v2/${b}/g1/${pub.snapshot.writer}-${pub.snapshot.sequence}.json`, pub.snapshot);
-                window.catalog = {api, sdk, exports, ids, parent, files, notes, writes, add, Store, holdSave: false, releaseSave: null, holdScan: false, scanStarted: false, scanAborted: false};
+                window.catalog = {api, sdk, exports, ids, parent, files, notes, writes, add, Store, requests: [], archiveReads: 0, holdSave: false, releaseSave: null, holdScan: false, scanStarted: false, scanAborted: false};
                 window.fetch = async (url, options) => {
                     const state = window.catalog, endpoint = String(url), data = options.body instanceof FormData ? null : JSON.parse(options.body ?? '{}');
+                    state.requests.push({endpoint, key: data?.path || data?.id || ''});
                     if (endpoint.endsWith('getDocInfo')) { const note = notes.get(data.id); return Response.json(note?.available ? {code: 0, data: {id: data.id, rootID: data.id, name: note.title}} : {code: -1, msg: 'block not found', data: null}); }
                     if (endpoint.endsWith('getHPathByID')) return Response.json({code: 0, data: `/Notebook/${notes.get(data.id)?.title ?? data.id}`});
                     if (endpoint.endsWith('readDir')) {
@@ -46,6 +47,7 @@ try {
                         return Response.json({code: 0, data: [...entries.values()]});
                     }
                     if (endpoint.endsWith('getFile')) {
+                        if (!data.path.includes('/document-lifecycle/') && data.path.endsWith('.json')) state.archiveReads++;
                         if (state.holdExport && data.path === `${parent}/${a}.json`) {
                             state.holdExport = false; state.exportPending = true;
                             return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => {state.exportAborted = true; reject(new DOMException('Aborted','AbortError'));}, {once:true}));
@@ -75,6 +77,7 @@ try {
                 Object.assign(window.catalog, {p, store, originalNotes: JSON.stringify([...notes])});
                 const setting = p.setting.items.find(item => item.title === 'Drawing list');
                 if (!setting) throw new Error('Missing drawing-list settings entry');
+                catalog.readBeforeList = catalog.archiveReads;
                 setting.createActionElement().click();
             });
             const ready = () => page.waitForFunction(() => document.querySelector('.pa-drawings__status')?.textContent.includes('results'));
@@ -82,10 +85,20 @@ try {
             assert.equal(await page.getByRole('button', {name:'Cancel',exact:true}).isVisible(), false);
             assert.equal(await page.getByRole('button', {name:'Show more',exact:true}).isVisible(), false);
             assert(await page.evaluate(() => catalog.p.palette.toolbar.style.visibility === 'hidden' && catalog.p.palette.handle.style.visibility === 'hidden'));
-            assert.equal(await page.locator('.pa-drawings__row').count(), 3);
+            assert.equal(await page.locator('.pa-drawings__row').count(), 4, 'empty and unreadable-content archives still exist; retired generations do not');
+            assert(await page.evaluate(() => catalog.archiveReads === catalog.readBeforeList), 'listing must not download stroke JSON, even to decide whether it is empty');
             assert.equal(await page.locator('.pa-drawings img').count(), 0);
             assert.equal(await page.evaluate(() => catalog.writes.length), 0, 'listing must be read-only even for restored/inaccessible notes');
-            assert.equal(await page.locator('.pa-drawings__row').first().locator('.pa-drawings__detail').innerText(), '3 strokes');
+            assert.equal(await page.locator('.pa-drawings__row').first().locator('.pa-drawings__detail').innerText(), 'Unsaved handwriting changes');
+            assert.equal(await page.locator('.pa-drawings__row[data-doc-id$="ccccccc"]').count(), 1, 'an empty archive stays in the archive directory');
+            assert.equal(await page.locator('.pa-drawings__row[data-doc-id$="ddddddd"]').count(), 0, 'a retirement guard is not an archive');
+            assert(await page.evaluate(async () => {
+                const root=`${catalog.parent}/sync-v2/${catalog.ids[3]}/g1`, paths=[];
+                for(let i=1;i<=2050;i++){const path=`${root}/w${'a'.repeat(32)}-${i}.json`;paths.push(path);catalog.files.set(path,{unreadableArchive:true});}
+                try {return (await catalog.api.drawingArchive(catalog.p,{id:catalog.ids[3],legacy:false},new AbortController().signal)).archived;}
+                finally {paths.forEach(path=>catalog.files.delete(path));}
+            }), 'metadata-only archive checks must not inherit the point-reader file-count limit');
+            assert(await page.evaluate(() => catalog.archiveReads === catalog.readBeforeList));
             await page.evaluate(() => {catalog.originalHost = window.siyuan; window.siyuan = {config:{readonly:true}};});
             await page.getByRole('button', {name:'Refresh',exact:true}).click(); await ready();
             assert.equal(await page.locator('.pa-drawings [data-action="delete"]:enabled').count(), 0);
@@ -93,12 +106,29 @@ try {
             await page.evaluate(() => {window.siyuan=catalog.originalHost;});
             await page.getByRole('button', {name:'Refresh',exact:true}).click(); await ready();
             await page.getByPlaceholder('Search title, path or document ID').fill('Alpha');
+            await page.waitForFunction(() => document.querySelectorAll('.pa-drawings__row').length === 1);
             assert.equal(await page.locator('.pa-drawings__row').count(), 1);
             await page.locator('.pa-drawings__row [data-action="open"]').click();
             await page.waitForSelector('.pa-drawings', {state: 'detached'});
             assert(await page.evaluate(() => catalog.p.palette.toolbar.style.visibility !== 'hidden' && catalog.p.palette.handle.style.visibility !== 'hidden'));
             assert.equal(await page.evaluate(() => catalog.sdk.navigation.calls.at(-1).id), '20261003120000-aaaaaaa');
+            const warmRequests = await page.evaluate(() => catalog.requests.length);
             await page.evaluate(() => { catalog.p.palette.setMode(true); catalog.p.palette.toolbar.querySelector('[aria-label="Drawing list"]').click(); }); await ready();
+            assert.equal(await page.evaluate(() => catalog.requests.length), warmRequests, 'warm reopen must make no network requests');
+            const changedRequests = await page.evaluate(() => {const n=catalog.requests.length;catalog.p.drawingCache.invalidate(catalog.ids[0]);return n;});
+            await page.waitForFunction(n => catalog.requests.length > n, changedRequests); await ready();
+            assert(await page.evaluate(n => catalog.requests.slice(n).every(r => r.key.includes(catalog.ids[0])), changedRequests), 'local changes should only recheck the affected archive');
+            assert(await page.evaluate(() => catalog.archiveReads === catalog.readBeforeList), 'refresh and incremental checks must not read point data');
+            const expiredRequests = await page.evaluate(() => {const n=catalog.requests.length;catalog.p.drawingList.destroy();catalog.p.drawingCache.checkedAt=Date.now()-31000;catalog.p.showDrawingList();return n;});
+            await ready();
+            assert(await page.evaluate(n => catalog.requests.slice(n).some(r => r.endpoint.endsWith('readDir') && r.key === catalog.parent), expiredRequests), 'expired cache must rediscover archive directories');
+            assert(await page.evaluate(n => catalog.requests.slice(n).filter(r => r.endpoint.endsWith('getDocInfo')).every(r => r.key === catalog.ids[1]), expiredRequests), 'fresh accessible title/path metadata should be reused');
+            const renameRequests = await page.evaluate(() => {const n=catalog.requests.length;catalog.oldTitle=catalog.notes.get(catalog.ids[0]).title;catalog.notes.get(catalog.ids[0]).title='Renamed archive';catalog.p.eventBus.emit('ws-main',{cmd:'rename',code:0,data:{ids:[catalog.ids[0]]}});return n;});
+            await page.waitForFunction(n => catalog.requests.length > n, renameRequests); await ready();
+            assert.equal(await page.locator('.pa-drawings__row[data-doc-id$="aaaaaaa"] .pa-drawings__title').innerText(), 'Renamed archive');
+            const restoreRequests = await page.evaluate(() => {const n=catalog.requests.length;catalog.notes.get(catalog.ids[0]).title=catalog.oldTitle;catalog.p.eventBus.emit('ws-main',{cmd:'rename',code:0,data:{ids:[catalog.ids[0]]}});return n;});
+            await page.waitForFunction(n => catalog.requests.length > n, restoreRequests); await ready();
+            assert(await page.evaluate(() => catalog.archiveReads === catalog.readBeforeList && catalog.writes.length === 0));
             await page.evaluate(() => {catalog.holdExport = true;});
             await page.locator('.pa-drawings__row[data-doc-id$="aaaaaaa"] [data-action="export"]').click();
             await page.waitForFunction(() => catalog.exportPending);
@@ -143,7 +173,7 @@ try {
             assert(fits.x >= 0 && fits.right <= 390 && fits.scroll <= fits.width);
             await page.evaluate(async () => {catalog.p.drawingList.destroy(); await catalog.p.onunload();});
             assert.deepEqual(errors, []);
-            console.log(`${name}: drawing list discovery/search/open/export, ink-only purge, slow writes, stale confirmations, readonly scan/cancel and mobile fit passed`);
+            console.log(`${name}: archive directory zero-point-data scans, zero-request warm reopen, targeted invalidation, search/open/export and safe cleanup passed`);
         } finally { await browser.close(); }
     }
 } finally { await server.close(); }
