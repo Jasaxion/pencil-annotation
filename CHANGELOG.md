@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2 (2026-10-06)
+
+- Keep the plugin settings window single-instance across toolbar and native/direct settings entry points. Repeated clicks, including during close animation, no longer create stacked windows or move controls out of the original window.
+- Allow reopening after cancel/save/close, release the guard if opening fails, and close the owned settings dialog when unloading.
+- Add Chromium/WebKit regressions for singleton behavior, control retention, persistence, reopen/error/unload handling, plus real SiYuan 3.8.6 desktop/mobile settings checks.
+
 ## 0.4.1 (2026-10-03)
 
 - Change Drawing list into a current-generation archive directory. Inspect filenames and small lifecycle records, not full migration/writer payloads; remove stroke totals. Empty/cleared archives remain listed, retired generations do not, and unsaved session changes remain distinguishable.

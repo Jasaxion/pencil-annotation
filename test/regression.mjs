@@ -54,20 +54,34 @@ try {
                 h.palette.setHandleVisible(true);
                 const restored = h.palette.handle.style.display !== "none";
                 await p.onload();
+                p.openSetting();
+                const first = p.setting.dialog, controls = first.element.querySelectorAll('input').length;
+                for (let i = 0; i < 8; i++) { p.openSetting(); p.setting.open('direct setting entry'); }
+                const singleton = p.setting.dialog === first && document.querySelectorAll('[data-test-settings]').length === 1 && controls > 0 && first.element.querySelectorAll('input').length === controls;
                 const row = p.setting.items.find(i => i.title === "Mouse drawing");
                 const checkbox = row.createActionElement();
                 checkbox.checked = true;
                 checkbox.dispatchEvent(new Event("change"));
                 const persisted = p.data["settings.json"].mouseDrawing;
-                await p.onunload();
-                return {migrated, hidden, toolbar, stillHidden, restored, persisted};
+                const controlsStayed = first.element.contains(checkbox);
+                first.element.querySelector('[data-setting-cancel]').click(); p.openSetting();
+                const second = p.setting.dialog, reopenAfterCancel = second !== first && checkbox.checked && second.element.contains(checkbox);
+                second.element.querySelector('[data-setting-save]').click(); p.openSetting();
+                const third = p.setting.dialog, reopenAfterSave = third !== second && third.element.contains(checkbox);
+                third.destroy(); p.setting.failNextOpen = true;
+                let failedOpen = false; try { p.openSetting(); } catch { failedOpen = true; }
+                p.openSetting(); const finalDialog = p.setting.dialog;
+                const failureRecovered = failedOpen && finalDialog !== third && finalDialog.element.isConnected;
+                await p.onunload(); p.openSetting(); p.setting.open('after unload');
+                const unloadClosed = !finalDialog.element.isConnected && document.querySelectorAll('[data-test-settings]').length === 0;
+                return {migrated, hidden, toolbar, stillHidden, restored, persisted, singleton, controlsStayed, reopenAfterCancel, reopenAfterSave, failureRecovered, unloadClosed};
             });
             assert.equal(settings.migrated.mouseDrawing, false);
             assert.equal(settings.migrated.doubleTapToggle, false);
             assert.equal(settings.migrated.showFloatingBall, true);
             assert.equal(settings.migrated.penWidth, 9);
-            for (const key of ["hidden", "toolbar", "stillHidden", "restored", "persisted"]) assert(settings[key], key);
-            console.log(`${name}: defaults, setting persistence and floating button passed`);
+            for (const key of ["hidden", "toolbar", "stillHidden", "restored", "persisted", "singleton", "controlsStayed", "reopenAfterCancel", "reopenAfterSave", "failureRecovered", "unloadClosed"]) assert(settings[key], key);
+            console.log(`${name}: setting singleton, close/reopen/save/failure/unload, persistence and floating button passed`);
 
             await open();
             await page.evaluate(() => window.harness.palette.setMode(false));

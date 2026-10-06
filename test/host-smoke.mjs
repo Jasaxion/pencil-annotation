@@ -97,6 +97,38 @@ try {
             const count = () => page.evaluate(id => Array.from(window.siyuan.ws.app.plugins.find(p => p.name === "pencil-annotation").overlays.values()).find(o => o.docId === id).store.strokes.length, doc);
             const before = await count();
             await page.locator(".pa-handle").click();
+            const settingsButton = page.getByRole('button', {name: 'Pencil Annotation Settings', exact: true});
+            const dialogsBefore = await page.locator('.b3-dialog').count();
+            await settingsButton.click();
+            await page.waitForSelector('.b3-dialog__action .b3-button--cancel');
+            await page.evaluate(() => {
+                const p = window.siyuan.ws.app.plugins.find(p => p.name === 'pencil-annotation'), dialog = p.setting.dialog;
+                window.settingFixture = {dialog, input: dialog.element.querySelector('input'), count: dialog.element.querySelectorAll('input').length};
+            });
+            await settingsButton.click(); await settingsButton.click();
+            assert(await page.evaluate(() => {
+                const p = window.siyuan.ws.app.plugins.find(p => p.name === 'pencil-annotation'), f = window.settingFixture;
+                p.openSetting(); p.setting.open('direct native entry');
+                return p.setting.dialog === f.dialog && f.count > 0 && f.dialog.element.contains(f.input) && f.dialog.element.querySelectorAll('input').length === f.count;
+            }), 'settings must reuse one dialog without moving its controls');
+            assert.equal(await page.locator('.b3-dialog').count(), dialogsBefore + 1);
+            await page.locator('.b3-dialog__action .b3-button--cancel').click();
+            assert(await page.evaluate(() => {
+                const p = window.siyuan.ws.app.plugins.find(p => p.name === 'pencil-annotation'), old = window.settingFixture.dialog;
+                if (!old.element.isConnected) return true;
+                p.openSetting(); return p.setting.dialog === old;
+            }), 'closing animation must not allow a duplicate settings dialog');
+            await page.waitForFunction(() => !window.settingFixture.dialog.element.isConnected);
+            await settingsButton.click();
+            assert(await page.evaluate(() => {
+                const p = window.siyuan.ws.app.plugins.find(p => p.name === 'pencil-annotation'), old = window.settingFixture;
+                const reopened = p.setting.dialog;
+                window.settingFixture = {dialog: reopened};
+                return reopened !== old.dialog && reopened.element.contains(old.input) && reopened.element.querySelectorAll('input').length === old.count;
+            }));
+            await page.locator('.b3-dialog__action .b3-button--text').click();
+            await page.waitForFunction(() => !window.settingFixture.dialog.element.isConnected);
+            console.log(`SiYuan ${name}/${mobile ? 'mobile' : 'desktop'}: settings singleton and cancel/save reopening passed`);
             const task = page.locator('[data-type="NodeListItem"][data-subtype="t"]:visible').first();
             const taskBefore = await task.getAttribute("data-task");
             const target = task.locator(".protyle-action").first();

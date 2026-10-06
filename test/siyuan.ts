@@ -18,8 +18,19 @@ export const fetchSyncPost = async (url: string, data: unknown) => (await fetch(
 })).json();
 export class Setting {
     items: any[] = [];
-    constructor(_options: unknown) {}
+    dialog?: Dialog;
+    failNextOpen = false;
+    constructor(private options: {destroyCallback?: () => void; confirmCallback?: () => void}) {}
     addItem(item: any) { this.items.push(item); }
+    open(_name: string) {
+        if (this.failNextOpen) { this.failNextOpen = false; throw new Error('setting-open failure'); }
+        const dialog = new Dialog({content: '<div data-test-settings></div><div class="b3-dialog__action"><button data-setting-cancel>Cancel</button><button data-setting-save>Save</button></div>', destroyCallback: this.options.destroyCallback});
+        const content = dialog.element.querySelector('[data-test-settings]')!;
+        for (const item of this.items) { const control = item.actionElement ?? item.createActionElement?.(); if (control) content.append(control); }
+        dialog.element.querySelector('[data-setting-cancel]')!.addEventListener('click', () => dialog.destroy());
+        dialog.element.querySelector('[data-setting-save]')!.addEventListener('click', () => {this.options.confirmCallback?.(); dialog.destroy();});
+        this.dialog = dialog;
+    }
 }
 export class Plugin {
     name = "pencil-annotation";
@@ -36,7 +47,7 @@ export class Plugin {
     saveData = async (name: string, value: unknown) => { this.data[name] = value; return {code: 0}; };
     addTopBar(_options: unknown) {}
     addCommand(_options: unknown) {}
-    openSetting() {}
+    openSetting() { this.setting?.open(this.name); }
 }
 export class Dialog {
     element = document.createElement("div");

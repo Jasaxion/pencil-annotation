@@ -35,6 +35,7 @@ export default class PencilAnnotationPlugin extends Plugin {
     private palette!: Palette;
     private activeOverlay: DocOverlay | null = null;
     private drawingList: Dialog | null = null;
+    private settingsOpen = false;
     private drawingCache = new DrawingListCache();
 
     private settings: PencilSettings = {...DEFAULT_SETTINGS};
@@ -187,6 +188,7 @@ export default class PencilAnnotationPlugin extends Plugin {
         this.eventBus.off("ws-main", this.onWsMain);
         cancelExports();
         this.drawingList?.destroy();
+        if (this.settingsOpen) (this.setting as Setting & {dialog?: Dialog})?.dialog?.destroy();
         if (this.syncPoll !== null) window.clearInterval(this.syncPoll);
         this.syncPoll = null;
         window.removeEventListener("pagehide", this.onPageHide);
@@ -774,7 +776,17 @@ export default class PencilAnnotationPlugin extends Plugin {
             height: "44vh",
             width: "600px",
             confirmCallback: () => this.applyAndPersistSettings(),
+            destroyCallback: () => { this.settingsOpen = false; },
         });
+        // Guard the shared Setting entry, not just the toolbar button: native
+        // callers can open it too, and the controls below are reused DOM nodes.
+        const open = this.setting.open.bind(this.setting);
+        this.setting.open = name => {
+            if (this.unloading || this.settingsOpen) return;
+            this.settingsOpen = true;
+            try { open(name); }
+            catch (error) { this.settingsOpen = false; throw error; }
+        };
         const s: Setting = this.setting;
         const row = (
             title: string,

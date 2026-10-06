@@ -52,7 +52,7 @@ Version 0.3.0 keeps the existing private directory, but independent browsers no 
 
 ### Upgrade and recovery
 
-1. Back up the entire `data/storage/petal/pencil-annotation/` directory, install **0.4.1**, restart SiYuan and refresh all browser/PWA clients. Existing storage/coordinates are retained; do not mix editing pages that still cache old scripts.
+1. Back up the entire `data/storage/petal/pencil-annotation/` directory, install **0.4.2**, restart SiYuan and refresh all browser/PWA clients. Existing storage/coordinates are retained; do not mix editing pages that still cache old scripts.
 2. Do not mix editing versions. Old clients cannot read subsequent v2 changes; replacing the script with an old version is not a data rollback.
 3. If an old client changes the legacy file, editing/saving pauses. After refreshing old clients, use **Merge legacy handwriting** in Export: it preserves the old file and adds new/changed values, never interprets absence as deletion, and keeps conflicts. This action cannot reimport retired data from a deleted document.
 4. For capacity/integrity errors, keep the page open. Undo unsent changes or download a JSON backup from Export. That backup covers loaded state and local changes, not unobserved remote data. If initial loading fails, preserve the complete server-side directory first.
