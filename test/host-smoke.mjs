@@ -65,10 +65,15 @@ try {
         {i: "legacy-seed", t: 0, c: "#334455", w: 4, o: 1, s: 0, a: 1, p: [120, 90, .5, 145, 100, .6]},
     ]});
     await writeFile(legacyFile, legacyBytes);
+    if (process.env.PENCIL_ARTIFACT_DIR) await mkdir(process.env.PENCIL_ARTIFACT_DIR, {recursive: true});
     for (const [name, mobile] of [["chromium", false], ["chromium", true], ["webkit", true]]) {
         const browser = await ({chromium, webkit}[name]).launch(name === "chromium" ? {channel: "chromium"} : {});
         try {
             const context = await browser.newContext({viewport: mobile ? {width: 390, height: 844} : {width: 1100, height: 800}, isMobile: mobile, hasTouch: mobile, ignoreHTTPSErrors: true});
+            await context.addInitScript(() => {
+                if (!localStorage.getItem('pencil-annotation.toolbar-pos')) localStorage.setItem('pencil-annotation.toolbar-pos', JSON.stringify({x:900,y:900}));
+                if (!localStorage.getItem('pencil-annotation.toolbar-dock')) localStorage.setItem('pencil-annotation.toolbar-dock', 'free');
+            });
             await context.request.post(base + "/api/system/loginAuth", {data: {authCode}});
             const page = await context.newPage();
             const errors = [];
@@ -97,6 +102,14 @@ try {
             const count = () => page.evaluate(id => Array.from(window.siyuan.ws.app.plugins.find(p => p.name === "pencil-annotation").overlays.values()).find(o => o.docId === id).store.strokes.length, doc);
             const before = await count();
             await page.locator(".pa-handle").click();
+            const toolbarFits = () => page.evaluate(() => {
+                const p = window.siyuan.ws.app.plugins.find(p => p.name === 'pencil-annotation').palette;
+                const r = p.toolbar.getBoundingClientRect(), b = p.visibleBounds();
+                return r.left >= b.left-.5 && r.top >= b.top-.5 && r.right <= b.right+.5 && r.bottom <= b.bottom+.5 && p.content.scrollWidth <= p.content.clientWidth+1;
+            });
+            assert(await toolbarFits(), 'saved positions must be clamped when the real toolbar becomes visible');
+            if (mobile) assert(await page.locator('.pa-toolbar').evaluate(el => el.classList.contains('pa-toolbar--compact') && el.getBoundingClientRect().height <= 140));
+            if (process.env.PENCIL_ARTIFACT_DIR) await page.screenshot({path:join(process.env.PENCIL_ARTIFACT_DIR,`${name}-${mobile?'mobile':'desktop'}-toolbar-auto.png`),animations:'disabled'});
             const settingsButton = page.getByRole('button', {name: 'Pencil Annotation Settings', exact: true});
             const dialogsBefore = await page.locator('.b3-dialog').count();
             await settingsButton.click();
@@ -105,7 +118,11 @@ try {
                 const p = window.siyuan.ws.app.plugins.find(p => p.name === 'pencil-annotation'), dialog = p.setting.dialog;
                 window.settingFixture = {dialog, input: dialog.element.querySelector('input'), count: dialog.element.querySelectorAll('input').length};
             });
-            await settingsButton.click(); await settingsButton.click();
+            assert(await page.evaluate(() => {
+                const p = window.siyuan.ws.app.plugins.find(p => p.name === 'pencil-annotation');
+                const panel = p.setting.dialog.element.querySelector('.b3-dialog');
+                return Number(getComputedStyle(p.palette.toolbar).zIndex) < Number(getComputedStyle(panel).zIndex);
+            }), 'toolbar must not cover the settings controls');
             assert(await page.evaluate(() => {
                 const p = window.siyuan.ws.app.plugins.find(p => p.name === 'pencil-annotation'), f = window.settingFixture;
                 p.openSetting(); p.setting.open('direct native entry');
@@ -126,9 +143,41 @@ try {
                 window.settingFixture = {dialog: reopened};
                 return reopened !== old.dialog && reopened.element.contains(old.input) && reopened.element.querySelectorAll('input').length === old.count;
             }));
+            const layout = page.getByRole('combobox', {name:'Toolbar layout',exact:true});
+            assert.equal(await layout.inputValue(), 'auto');
+            const settingsBefore = await page.evaluate(() => JSON.stringify(window.siyuan.ws.app.plugins.find(p=>p.name==='pencil-annotation').settings));
+            await layout.selectOption('vertical');
+            assert(await toolbarFits());
+            assert(await page.locator('.pa-toolbar').evaluate(el=>el.classList.contains('pa-toolbar--vertical')&&el.getBoundingClientRect().width<=130));
+            assert.equal(await page.evaluate(() => JSON.stringify(window.siyuan.ws.app.plugins.find(p=>p.name==='pencil-annotation').settings)), settingsBefore, 'layout must not mutate shared settings');
             await page.locator('.b3-dialog__action .b3-button--text').click();
             await page.waitForFunction(() => !window.settingFixture.dialog.element.isConnected);
-            console.log(`SiYuan ${name}/${mobile ? 'mobile' : 'desktop'}: settings singleton and cancel/save reopening passed`);
+            if (process.env.PENCIL_ARTIFACT_DIR) await page.screenshot({path:join(process.env.PENCIL_ARTIFACT_DIR,`${name}-${mobile?'mobile':'desktop'}-toolbar-vertical.png`),animations:'disabled'});
+            await settingsButton.click();
+            assert.equal(await page.getByRole('combobox',{name:'Toolbar layout',exact:true}).inputValue(),'vertical');
+            await page.getByRole('combobox',{name:'Toolbar layout',exact:true}).selectOption('auto');
+            await page.locator('.b3-dialog__action .b3-button--text').click();
+            await page.waitForFunction(() => !window.siyuan.ws.app.plugins.find(p=>p.name==='pencil-annotation').settingsOpen);
+            if (mobile) {
+                await page.setViewportSize({width:568,height:300});
+                await page.evaluate(() => {const p=window.siyuan.ws.app.plugins.find(p=>p.name==='pencil-annotation');p.palette.setLayout('vertical');p.palette.content.scrollTop=0;});
+                await page.waitForFunction(() => window.siyuan.ws.app.plugins.find(p=>p.name==='pencil-annotation').palette.toolbar.classList.contains('pa-toolbar--scrollable'));
+                assert(await toolbarFits());
+                const scroller=page.locator('.pa-toolbar__content'), r=await scroller.boundingBox();
+                const docScroll=await page.evaluate(id=>[...window.siyuan.ws.app.plugins.find(p=>p.name==='pencil-annotation').overlays.values()].find(o=>o.docId===id).protyle.contentElement.scrollTop,doc);
+                if (name==='chromium') {
+                    const cdp=await context.newCDPSession(page), x=r.x+1;
+                    await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y:r.y+r.height-24}]});
+                    for(let y=r.y+r.height-44;y>r.y+20;y-=15)await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x,y}]});
+                    await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+                } else await page.locator('.pa-toolbar__content .pa-btn').last().focus();
+                await page.waitForFunction(() => window.siyuan.ws.app.plugins.find(p=>p.name==='pencil-annotation').palette.content.scrollTop>15);
+                assert.equal(await page.evaluate(id=>[...window.siyuan.ws.app.plugins.find(p=>p.name==='pencil-annotation').overlays.values()].find(o=>o.docId===id).protyle.contentElement.scrollTop,doc),docScroll);
+                await page.setViewportSize({width:390,height:844});
+                await page.evaluate(id=>{const p=window.siyuan.ws.app.plugins.find(p=>p.name==='pencil-annotation');p.palette.setLayout('auto');[...p.overlays.values()].find(o=>o.docId===id).protyle.contentElement.scrollTop=0;},doc);
+                assert(await toolbarFits());
+            }
+            console.log(`SiYuan ${name}/${mobile ? 'mobile' : 'desktop'}: settings singleton, local layout preference, current bounds and compact/vertical controls passed`);
             const task = page.locator('[data-type="NodeListItem"][data-subtype="t"]:visible').first();
             const taskBefore = await task.getAttribute("data-task");
             const target = task.locator(".protyle-action").first();

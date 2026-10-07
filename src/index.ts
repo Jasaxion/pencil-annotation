@@ -9,7 +9,7 @@ import {
     type Dialog,
 } from "siyuan";
 import {DocOverlay, type OverlayConfig, type OverlaySettings, type ProtyleLike} from "./overlay/overlay";
-import {Palette, type PaletteAction} from "./overlay/toolbar";
+import {Palette, type PaletteAction, type ToolbarLayout} from "./overlay/toolbar";
 import {TOPBAR_SVG} from "./overlay/icons";
 import {checkPublicationBudget, drawingCandidates, drawingGeneration, drawingArchive, kernelJSON, cleanupRetiredDocument, DocumentRetiredError, fenceDocument, loadPayload, planDocumentDeletion, reconcileLegacy as importLegacyInk, releasePayloadCache, retiredDocumentIds, retireDocumentGeneration, savePayload, settleDocumentWrites, validDocumentId} from "./plugin/api";
 import {SyncCapacityError, SyncTransientError} from "./engine/sync";
@@ -105,6 +105,7 @@ export default class PencilAnnotationPlugin extends Plugin {
         this.eventBus.on("click-editorcontent", ({detail}) => this.setActiveProtyle(detail.protyle));
 
         this.palette = new Palette({
+            mobile: ['mobile', 'browser-mobile'].includes(getFrontend()),
             i18n: this.t,
             config: this.config,
             settings: this.overlaySettings,
@@ -154,7 +155,6 @@ export default class PencilAnnotationPlugin extends Plugin {
         // no loaded-protyle event will fire — pick them up after onload settles
         window.setTimeout(() => this.attachExisting(), 600);
 
-        window.addEventListener("resize", this.onViewportResize);
         document.addEventListener("keydown", this.onKeyDown, true);
         document.addEventListener("visibilitychange", this.onVisibilityChange);
         window.addEventListener("pagehide", this.onPageHide);
@@ -193,7 +193,6 @@ export default class PencilAnnotationPlugin extends Plugin {
         this.syncPoll = null;
         window.removeEventListener("pagehide", this.onPageHide);
         window.removeEventListener("online", this.onOnline);
-        window.removeEventListener("resize", this.onViewportResize);
         document.removeEventListener("keydown", this.onKeyDown, true);
         document.removeEventListener("visibilitychange", this.onVisibilityChange);
         for (const overlay of this.overlays.values()) {
@@ -742,10 +741,6 @@ export default class PencilAnnotationPlugin extends Plugin {
         else this.onOnline();
     };
 
-    private onViewportResize = () => {
-        this.palette.repositionForViewport();
-    };
-
     // -------------------------------------------------------------- keyboard
 
     private onKeyDown = (e: KeyboardEvent) => {
@@ -772,11 +767,19 @@ export default class PencilAnnotationPlugin extends Plugin {
     // -------------------------------------------------------------- settings
 
     private buildSettingDialog() {
+        let paletteLayer: [string, string] | null = null;
+        const closed = () => {
+            this.settingsOpen = false;
+            if (paletteLayer) {
+                this.palette.toolbar.style.zIndex = paletteLayer[0]; this.palette.handle.style.zIndex = paletteLayer[1];
+                paletteLayer = null;
+            }
+        };
         this.setting = new Setting({
             height: "44vh",
             width: "600px",
             confirmCallback: () => this.applyAndPersistSettings(),
-            destroyCallback: () => { this.settingsOpen = false; },
+            destroyCallback: closed,
         });
         // Guard the shared Setting entry, not just the toolbar button: native
         // callers can open it too, and the controls below are reused DOM nodes.
@@ -784,8 +787,18 @@ export default class PencilAnnotationPlugin extends Plugin {
         this.setting.open = name => {
             if (this.unloading || this.settingsOpen) return;
             this.settingsOpen = true;
-            try { open(name); }
-            catch (error) { this.settingsOpen = false; throw error; }
+            try {
+                open(name);
+                const dialog = (this.setting as Setting & {dialog?: Dialog}).dialog;
+                if (dialog) {
+                    const element = dialog.element.querySelector<HTMLElement>('.b3-dialog') ?? dialog.element;
+                    const z = parseInt(getComputedStyle(element).zIndex);
+                    if (Number.isFinite(z)) {
+                        paletteLayer = [this.palette.toolbar.style.zIndex, this.palette.handle.style.zIndex];
+                        this.palette.toolbar.style.zIndex = this.palette.handle.style.zIndex = String(z - 1);
+                    }
+                }
+            } catch (error) { closed(); throw error; }
         };
         const s: Setting = this.setting;
         const row = (
@@ -847,6 +860,14 @@ export default class PencilAnnotationPlugin extends Plugin {
         const listButton = document.createElement('button'); listButton.className = 'b3-button'; listButton.textContent = this.t('drawingList');
         listButton.addEventListener('click', () => this.showDrawingList());
         row(this.t('drawingList'), this.t('drawingListHint'), listButton);
+
+        const layout = document.createElement('select'); layout.className = 'b3-select'; layout.setAttribute('aria-label', this.t('settingToolbarLayout'));
+        for (const [value, key] of [['auto', 'toolbarLayoutAuto'], ['horizontal', 'toolbarLayoutHorizontal'], ['vertical', 'toolbarLayoutVertical']]) {
+            const option = document.createElement('option'); option.value = value; option.textContent = this.t(key); layout.append(option);
+        }
+        layout.value = this.palette.getLayout();
+        layout.addEventListener('change', () => this.palette.setLayout(layout.value as ToolbarLayout));
+        row(this.t('settingToolbarLayout'), this.t('settingToolbarLayoutHint'), layout);
 
         row(this.t("settingShowFloatingBall"), this.t("settingShowFloatingBallHint"),
             mkCheckbox(() => this.settings.showFloatingBall, (v) => {

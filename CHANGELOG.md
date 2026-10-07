@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.3 (2026-10-07)
+
+- Fix toolbar overflow when restoring saved positions measured while hidden. Re-measure after showing, changing tools/layout, resizing, zooming or changing the visual viewport; respect safe-area insets and preserve nearby right/bottom alignment.
+- Use a compact wrapping palette on mobile frontends and narrow screens, retaining every action, grouped color swatches and the width slider. Add device/browser-local Auto, Horizontal and Vertical two-column layout preferences in settings.
+- Keep the drag grip reachable while short viewports scroll the palette contents independently of the note. Layout/viewport changes preserve slider elements; resize observers and visual-viewport listeners are cleaned up on unload.
+- Keep the palette behind its settings dialog so vertical/compact controls do not cover configuration fields; preserve single-instance settings behavior and normal layer restoration afterward.
+- Add Chromium/WebKit viewport/tool/layout/docking matrices, first-show saved-position, safe-area/visual-viewport/zoom, scrolling, grip ownership, slider continuity and denied-storage checks. Extend real temporary SiYuan 3.8.6 desktop/mobile coverage while retaining existing input, sync, deletion and PDF regressions.
+
 ## 0.4.2 (2026-10-06)
 
 - Keep the plugin settings window single-instance across toolbar and native/direct settings entry points. Repeated clicks, including during close animation, no longer create stacked windows or move controls out of the original window.

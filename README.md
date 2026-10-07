@@ -15,7 +15,7 @@ Handwrite on SiYuan documents with **Apple Pencil / Android pens / drawing table
 - **Undo / redo** — toolbar buttons (plus `Ctrl+Z` / `Ctrl+Shift+Z` on desktop), up to 100 steps.
 - **Writing-first inputs** — the pen draws, fingers only pan (including horizontal tables), and the mouse edits normally unless mouse drawing is enabled. Palm contacts are rejected during ink input. Exit drawing mode before tapping tasks, resizing tables or editing by touch; normal pen/touch interaction is restored on exit. SiYuan 3.8 table/gutter editing controls also reject pen activation and pen context menus without blocking ordinary mouse use.
 - **Pen-tip double-tap** — optionally tap the page twice to switch pen ↔ eraser. Off by default to avoid mistaking punctuation for a gesture; existing explicit preferences are preserved. This is not the pen's barrel gesture.
-- **Floating toolbar** — draggable handle + palette with position memory. Hide the handle in settings; desktop top-bar/command entry remains available, and mobile users can restore it in plugin settings. The toolbar wraps on narrow screens.
+- **Floating toolbar** — draggable handle/palette with position memory, compact wrapping on mobile/narrow screens, and horizontal or vertical two-column layouts saved per device/browser. The handle can be hidden; top-bar/command entry remains available.
 - **Export** — full-note image-based PDF with handwriting and browser download; handwriting-only PNG save/insert; raw JSON backup including unsaved local changes.
 - **Drawing list** — browse handwriting archives without stroke totals, open/export them or permanently delete only their handwriting; available from settings and the toolbar.
 - **English & Simplified Chinese UI**.
@@ -52,7 +52,7 @@ Version 0.3.0 keeps the existing private directory, but independent browsers no 
 
 ### Upgrade and recovery
 
-1. Back up the entire `data/storage/petal/pencil-annotation/` directory, install **0.4.2**, restart SiYuan and refresh all browser/PWA clients. Existing storage/coordinates are retained; do not mix editing pages that still cache old scripts.
+1. Back up the entire `data/storage/petal/pencil-annotation/` directory, install **0.4.3**, restart SiYuan and refresh all browser/PWA clients. Existing storage/coordinates are retained; do not mix editing pages that still cache old scripts.
 2. Do not mix editing versions. Old clients cannot read subsequent v2 changes; replacing the script with an old version is not a data rollback.
 3. If an old client changes the legacy file, editing/saving pauses. After refreshing old clients, use **Merge legacy handwriting** in Export: it preserves the old file and adds new/changed values, never interprets absence as deletion, and keeps conflicts. This action cannot reimport retired data from a deleted document.
 4. For capacity/integrity errors, keep the page open. Undo unsent changes or download a JSON backup from Export. That backup covers loaded state and local changes, not unobserved remote data. If initial loading fails, preserve the complete server-side directory first.
@@ -60,6 +60,14 @@ Version 0.3.0 keeps the existing private directory, but independent browsers no 
 File, aggregate-document, session and retirement limits are defined in `src/engine/sync.ts` and `src/plugin/api.ts`. Reaching them pauses work instead of truncating data. Many long-lived writer sessions may require controlled maintenance; do not manually discard migration bases, latest snapshots or tombstones.
 
 A save confirms local-kernel write/read-back, not delivery to every separate workspace. Failed writes are retained and retried a bounded number of times. Unacknowledged changes can still be lost on process kill, power failure or offline shutdown.
+
+## Mobile and toolbar layout
+
+- Auto keeps a horizontal palette on wide screens and compact wrapping on mobile frontends (including wide mobile mode) or narrow viewports, usually two or three rows. All actions remain available, with regrouped colors and width controls.
+- **Plugin settings → Toolbar layout** offers Auto, Horizontal and Vertical two-column layouts. The preference stays in this device/browser, not shared workspace settings. Existing positions are retained and clamped to the visible area.
+- Drag the dotted grip to move the palette; non-control blank areas remain draggable when no scrolling is needed. Short viewports scroll the palette content independently of the note while keeping the grip reachable.
+- Show/tool changes, rotation, zoom and visual-viewport updates recheck bounds and safe areas. Nearby right/bottom alignment is retained across layout changes. Viewport adjustments do not recreate an active slider.
+- Settings stay above the palette, with its normal layer restored on close. These presentation changes do not alter pen/finger/mouse document input or the handwriting storage format.
 
 ## Drawing list (lightweight archive directory)
 
@@ -125,7 +133,7 @@ SIYUAN_KERNEL=/path/to/SiYuan-Kernel npm run test:host  # optional real-host che
 npm run pack
 ```
 
-`test/performance.mjs` checks exact segment/dot hits, batched offsets, lazy offscreen outlines, unchanged pixels, deferred selection snapshots and stalled-frame fallback. `test/drawing-list.mjs` measures zero stroke-JSON reads during archive checks, zero-request warm reopen, targeted invalidation and safe cleanup. `test/current-pdf.mjs` covers current layout, pixels, safe content and omitted redundant previews. Existing sync/deletion/input/native-preview suites remain enabled. The temporary-kernel host suite validates the actual GUI, image resources, PDFs and unchanged note files after ink cleanup.
+`test/toolbar.mjs` covers restored first-show positions, layout/viewport matrices, visual viewport/safe areas, zoom, scrolling, drag ownership, slider continuity and local preferences. `test/performance.mjs` checks exact segment/dot hits, batched offsets, lazy offscreen outlines, unchanged pixels, deferred selection snapshots and stalled-frame fallback. `test/drawing-list.mjs` measures zero stroke-JSON reads during archive checks, zero-request warm reopen, targeted invalidation and safe cleanup. `test/current-pdf.mjs` covers current layout, pixels, safe content and omitted redundant previews. Existing sync/deletion/input/native-preview suites remain enabled. The temporary-kernel host suite validates the actual GUI, image resources, PDFs and unchanged note files after ink cleanup.
 
 Browser/mobile-viewport automation is **not physical Android/iPad or installed-PWA certification**. Hardware pressure, OS palm rejection and interruptions still need device checks; WebKit pen injection in the tests uses synthetic events.
 

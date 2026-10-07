@@ -27,7 +27,10 @@ export interface PaletteState {
     warning: string;
 }
 
+export type ToolbarLayout = "auto" | "horizontal" | "vertical";
 export interface PaletteDeps {
+    /** Host mobile frontend, including wide tablet/desktop mobile mode. */
+    mobile?: boolean;
     i18n: (key: string, vars?: Record<string, string>) => string;
     config: OverlayConfig;
     settings: OverlaySettings;
@@ -42,14 +45,21 @@ export interface PaletteDeps {
 const POS_KEY = "pencil-annotation.toolbar-pos";
 const DOCK_KEY = "pencil-annotation.toolbar-dock";
 const HANDLE_POS_KEY = "pencil-annotation.handle-pos";
+const LAYOUT_KEY = "pencil-annotation.toolbar-layout";
+interface VisibleBounds {left: number; top: number; right: number; bottom: number; width: number; height: number}
 
 type Dock = "free" | "top" | "bottom" | "left" | "right";
 const DOCK_SNAP = 34;   // px from an edge that triggers docking
-const DOCK_MARGIN = 4;  // gap between a docked toolbar and the screen edge
 
 const loadDock = (): Dock => {
-    const v = localStorage.getItem(DOCK_KEY);
-    return v === "top" || v === "bottom" || v === "left" || v === "right" ? v : "free";
+    try {
+        const v = localStorage.getItem(DOCK_KEY);
+        return v === "top" || v === "bottom" || v === "left" || v === "right" ? v : "free";
+    } catch { return "free"; }
+};
+const loadLayout = (): ToolbarLayout => {
+    try { const value = localStorage.getItem(LAYOUT_KEY); return value === "horizontal" || value === "vertical" ? value : "auto"; }
+    catch { return "auto"; }
 };
 
 const saveDock = (dock: Dock) => {
@@ -63,7 +73,7 @@ const loadPos = (key: string): { x: number; y: number } | null => {
         const raw = localStorage.getItem(key);
         if (!raw) return null;
         const v = JSON.parse(raw);
-        if (typeof v?.x === "number" && typeof v?.y === "number") return v;
+        if (Number.isFinite(v?.x) && Number.isFinite(v?.y)) return v;
     } catch { /* ignore */ }
     return null;
 };
@@ -84,17 +94,25 @@ export class Palette {
     private stopDrag: (() => void) | null = null;
     private showHandle = true;
     private dock: Dock = loadDock();
+    private layout: ToolbarLayout = loadLayout();
+    private content!: HTMLDivElement;
+    private destroyed = false;
+    private positionFrame: number | null = null;
+    private sizeObserver: ResizeObserver | null = null;
+    private visualViewport = window.visualViewport;
 
     constructor(deps: PaletteDeps) {
         this.deps = deps;
 
         this.toolbar = document.createElement("div");
         this.toolbar.className = "pa-toolbar";
+        this.toolbar.dataset.preventSwipe = "";
         this.toolbar.style.display = "none";
         document.body.appendChild(this.toolbar);
 
         this.handle = document.createElement("button");
         this.handle.className = "pa-handle";
+        this.handle.dataset.preventSwipe = "";
         this.handle.setAttribute("aria-label", deps.i18n("topbarTitle"));
         this.handle.innerHTML = ICONS.penStroke;
         this.handle.style.display = "none";
@@ -107,6 +125,13 @@ export class Palette {
             this.suppressClick = false;
         });
         this.renderToolbar();
+        window.addEventListener('resize', this.requestReposition);
+        this.visualViewport?.addEventListener('resize', this.requestReposition);
+        this.visualViewport?.addEventListener('scroll', this.requestReposition);
+        this.sizeObserver = new ResizeObserver(this.requestReposition);
+        this.sizeObserver.observe(this.toolbar);
+        this.sizeObserver.observe(this.handle);
+        this.sizeObserver.observe(this.content);
     }
 
     // -------------------------------------------------------------- layout
@@ -122,27 +147,73 @@ export class Palette {
         else this.defaultHandlePos();
     }
 
-    private applyDockClass() {
-        this.toolbar.classList.toggle(
-            "pa-toolbar--vertical",
-            this.dock === "left" || this.dock === "right",
-        );
+    private visibleBounds(): VisibleBounds {
+        const vv = window.visualViewport;
+        const width = Math.min(innerWidth, vv && vv.width > 0 ? vv.width : innerWidth);
+        const height = Math.min(innerHeight, vv && vv.height > 0 ? vv.height : innerHeight);
+        const x = Math.max(0, Math.min(vv?.offsetLeft ?? 0, innerWidth - width));
+        const y = Math.max(0, Math.min(vv?.offsetTop ?? 0, innerHeight - height));
+        const style = getComputedStyle(this.toolbar);
+        const inset = (edge: string) => Math.max(0, parseFloat(style.getPropertyValue(`--pa-safe-${edge}`)) || 0);
+        const left = x + 8 + inset('left'), top = y + 8 + inset('top');
+        const right = Math.max(left + 1, x + width - 8 - inset('right'));
+        const bottom = Math.max(top + 1, y + height - 8 - inset('bottom'));
+        return {left, top, right, bottom, width: right - left, height: bottom - top};
     }
 
+    private applyDockClass() {
+        const bounds = this.visibleBounds();
+        const compact = !!this.deps.mobile || bounds.width < 900;
+        const vertical = this.layout === 'vertical' || (this.layout === 'auto' && !compact && (this.dock === 'left' || this.dock === 'right'));
+        this.toolbar.classList.toggle('pa-toolbar--compact', compact);
+        this.toolbar.classList.toggle('pa-toolbar--vertical', vertical);
+        this.toolbar.style.setProperty('--pa-view-width', `${bounds.width}px`);
+        this.toolbar.style.setProperty('--pa-view-height', `${bounds.height}px`);
+        this.handle.style.maxWidth = `${bounds.width}px`;
+        this.handle.style.maxHeight = `${bounds.height}px`;
+    }
+
+    getLayout(): ToolbarLayout { return this.layout; }
+    setLayout(layout: ToolbarLayout) {
+        const previous = this.toolbar.getBoundingClientRect();
+        this.layout = layout === 'horizontal' || layout === 'vertical' ? layout : 'auto';
+        try { localStorage.setItem(LAYOUT_KEY, this.layout); } catch { /* current session still works */ }
+        this.repositionAfterLayout(previous);
+    }
+
+    private repositionAfterLayout(previous: DOMRect) {
+        this.applyDockClass();
+        if (previous.width && previous.height && this.toolbar.style.display !== 'none') {
+            const b = this.visibleBounds();
+            const x = Math.abs(previous.right - b.right) <= DOCK_SNAP ? b.right - this.toolbar.offsetWidth : previous.left;
+            const y = Math.abs(previous.bottom - b.bottom) <= DOCK_SNAP ? b.bottom - this.toolbar.offsetHeight : previous.top;
+            this.place(this.toolbar, {x, y});
+        }
+        this.repositionForViewport();
+    }
+
+    private requestReposition = () => {
+        if (this.destroyed || this.positionFrame !== null) return;
+        this.positionFrame = requestAnimationFrame(() => { this.positionFrame = null; this.repositionForViewport(); });
+    };
+
     private defaultToolbarPos() {
-        this.place(this.toolbar, {x: window.innerWidth - 320, y: 16});
+        const b = this.visibleBounds();
+        this.place(this.toolbar, {x: b.right, y: b.top + 8});
     }
 
     private defaultHandlePos() {
-        this.place(this.handle, {x: window.innerWidth - 62, y: Math.max(80, window.innerHeight * 0.3)});
+        const b = this.visibleBounds();
+        this.place(this.handle, {x: b.right - 46, y: b.top + b.height * 0.3});
     }
 
     /** viewport is `fixed`-positioned: x/y are the top-left corner */
     private place(el: HTMLElement, pos: { x: number; y: number }) {
-        const w = el.offsetWidth || 60;
+        const bounds = this.visibleBounds();
+        const w = el.offsetWidth || (el === this.handle ? 46 : 60);
         const h = el.offsetHeight || 46;
-        const x = Math.min(Math.max(8, pos.x), Math.max(8, window.innerWidth - w - 8));
-        const y = Math.min(Math.max(8, pos.y), Math.max(8, window.innerHeight - h - 8));
+        const x = Math.min(Math.max(bounds.left, pos.x), Math.max(bounds.left, bounds.right - w));
+        const y = Math.min(Math.max(bounds.top, pos.y), Math.max(bounds.top, bounds.bottom - h));
         el.style.left = `${x}px`;
         el.style.top = `${y}px`;
         el.style.right = "auto";
@@ -158,10 +229,11 @@ export class Palette {
         const h = el.offsetHeight || 46;
         const cur = {x: parseFloat(el.style.left || "0"), y: parseFloat(el.style.top || "0")};
         let x = cur.x, y = cur.y;
-        if (this.dock === "left") x = DOCK_MARGIN;
-        else if (this.dock === "right") x = window.innerWidth - w - DOCK_MARGIN;
-        else if (this.dock === "top") y = DOCK_MARGIN;
-        else if (this.dock === "bottom") y = window.innerHeight - h - DOCK_MARGIN;
+        const bounds = this.visibleBounds();
+        if (this.dock === "left") x = bounds.left;
+        else if (this.dock === "right") x = bounds.right - w;
+        else if (this.dock === "top") y = bounds.top;
+        else if (this.dock === "bottom") y = bounds.bottom - h;
         this.place(el, {x, y});
     }
 
@@ -169,19 +241,20 @@ export class Palette {
     private applyDockDrag(x: number, y: number, px: number, py: number) {
         const el = this.toolbar;
         let dock: Dock = "free";
-        if (px < DOCK_SNAP) dock = "left";
-        else if (px > window.innerWidth - DOCK_SNAP) dock = "right";
-        else if (py < DOCK_SNAP) dock = "top";
-        else if (py > window.innerHeight - DOCK_SNAP) dock = "bottom";
+        const bounds = this.visibleBounds();
+        if (px < bounds.left + DOCK_SNAP) dock = "left";
+        else if (px > bounds.right - DOCK_SNAP) dock = "right";
+        else if (py < bounds.top + DOCK_SNAP) dock = "top";
+        else if (py > bounds.bottom - DOCK_SNAP) dock = "bottom";
         this.dock = dock;
-        el.classList.toggle("pa-toolbar--vertical", dock === "left" || dock === "right");
+        this.applyDockClass();
         const w2 = el.offsetWidth || 60;
         const h2 = el.offsetHeight || 46;
         let lx = x, ly = y;
-        if (dock === "left") lx = DOCK_MARGIN;
-        else if (dock === "right") lx = window.innerWidth - w2 - DOCK_MARGIN;
-        else if (dock === "top") ly = DOCK_MARGIN;
-        else if (dock === "bottom") ly = window.innerHeight - h2 - DOCK_MARGIN;
+        if (dock === "left") lx = bounds.left;
+        else if (dock === "right") lx = bounds.right - w2;
+        else if (dock === "top") ly = bounds.top;
+        else if (dock === "bottom") ly = bounds.bottom - h2;
         this.place(el, {x: lx, y: ly});
     }
 
@@ -195,7 +268,8 @@ export class Palette {
             el.addEventListener("pointerdown", (e: PointerEvent) => {
                 if (this.stopDrag || e.button !== 0) return;
                 const target = e.target as HTMLElement;
-                if (el === this.toolbar && target.closest("button,input,.pa-width")) return; // controls stay interactive
+                if (el === this.toolbar && target.closest("button,input,select,.pa-width")) return;
+                if (el === this.toolbar && this.content.scrollHeight > this.content.clientHeight + 1 && !target.closest('.pa-toolbar__grip')) return;
                 e.preventDefault();
                 e.stopPropagation();
                 this.suppressClick = false;
@@ -242,9 +316,9 @@ export class Palette {
                                 y: parseFloat(el.style.top || "0"),
                             });
                             saveDock(this.dock);
-                            requestAnimationFrame(() => this.snapToDock());
+                            this.requestReposition();
                         } else {
-                            savePos(key, {x: ev.clientX - offX, y: ev.clientY - offY});
+                            savePos(key, {x: parseFloat(el.style.left || '0'), y: parseFloat(el.style.top || '0')});
                             this.suppressClick = true; // drag, not a tap
                         }
                     } else if (el === this.handle) {
@@ -305,6 +379,7 @@ export class Palette {
         sliderBox.className = "pa-width__slider";
         const input = document.createElement("input");
         input.type = "range";
+        input.setAttribute('aria-label', this.deps.i18n('toolbarWidth'));
         input.min = String(range.min);
         input.max = String(range.max);
         input.step = String(range.step);
@@ -335,15 +410,22 @@ export class Palette {
     }
 
     private renderToolbar() {
+        const previous = this.toolbar.getBoundingClientRect();
         const t = this.deps.i18n;
         const cfg = this.deps.config;
         const tool = cfg.tool;
 
-        this.toolbar.innerHTML = "";
+        this.sizeObserver?.unobserve(this.content);
+        this.toolbar.replaceChildren();
+        const grip = document.createElement('div'); grip.className = 'pa-toolbar__grip';
+        grip.title = t('toolbarDrag'); grip.setAttribute('aria-label', t('toolbarDrag'));
+        grip.innerHTML = '<svg viewBox="0 0 12 24" width="12" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h.01M8 6h.01M4 12h.01M8 12h.01M4 18h.01M8 18h.01"/></svg>';
+        this.content = document.createElement('div'); this.content.className = 'pa-toolbar__content';
+        this.toolbar.append(grip, this.content);
         if (this.state.warning) {
             const warning = this.btn("", this.state.warning, () => this.deps.onAction("export"), "pa-sync-warning");
             warning.textContent = t("syncPaused");
-            this.toolbar.append(warning);
+            this.content.append(warning);
         }
 
         // tool buttons
@@ -360,9 +442,9 @@ export class Palette {
                 tool === id ? "pa-btn--active" : "");
             toolsGroup.appendChild(b);
         }
-        this.toolbar.appendChild(toolsGroup);
+        this.content.appendChild(toolsGroup);
 
-        this.toolbar.appendChild(this.sep());
+        this.content.appendChild(this.sep());
 
         // contextual options
         const options = document.createElement("div");
@@ -370,17 +452,19 @@ export class Palette {
         if (tool === "pen" || tool === "highlighter") {
             const colors = tool === "pen" ? PEN_COLORS : HL_COLORS;
             const activeColor = tool === "pen" ? cfg.penColor : cfg.hlColor;
+            const swatches = document.createElement('div'); swatches.className = 'pa-toolbar__colors';
             for (const c of colors) {
                 const sw = document.createElement("button");
                 sw.className = `pa-swatch ${c.toLowerCase() === activeColor.toLowerCase() ? "pa-swatch--active" : ""}`;
                 sw.style.background = c;
-                sw.title = c;
+                sw.title = c; sw.setAttribute('aria-label', c);
                 sw.addEventListener("click", (e) => {
                     e.stopPropagation();
                     this.deps.onColor(c);
                 });
-                options.appendChild(sw);
+                swatches.appendChild(sw);
             }
+            options.appendChild(swatches);
             const activeWidth = tool === "pen" ? cfg.penWidth : cfg.hlWidth;
             options.appendChild(this.widthSlider(tool, activeWidth, activeColor));
         } else if (tool === "eraser") {
@@ -388,26 +472,27 @@ export class Palette {
                 "eraser", this.deps.settings.eraserRadius, "rgba(255,255,255,.9)"));
         } else if (tool === "select") {
             const hint = document.createElement("span");
-            hint.style.cssText = "font-size:12px;color:rgba(255,255,255,.65);white-space:nowrap;";
+            hint.className = 'pa-toolbar__hint';
+            hint.style.cssText = "font-size:12px;color:rgba(255,255,255,.65);";
             hint.textContent = this.state.hasSelection
                 ? t("strokeDelete")
                 : t("toolSelect");
             options.appendChild(hint);
         }
-        this.toolbar.appendChild(options);
+        this.content.appendChild(options);
 
         // selection actions
         if (this.state.hasSelection) {
-            this.toolbar.appendChild(this.sep());
+            this.content.appendChild(this.sep());
             const selGroup = document.createElement("div");
             selGroup.className = "pa-toolbar__selection";
             selGroup.appendChild(this.btn(ICONS.duplicate, this.deps.i18n("strokeDuplicate"), () => this.deps.onAction("dupSel")));
             selGroup.appendChild(this.btn(ICONS.trash, this.deps.i18n("strokeDelete"), () => this.deps.onAction("deleteSel")));
             selGroup.appendChild(this.btn(ICONS.check, this.deps.i18n("strokeDeselect"), () => this.deps.onAction("doneSel")));
-            this.toolbar.appendChild(selGroup);
+            this.content.appendChild(selGroup);
         }
 
-        this.toolbar.appendChild(this.sep());
+        this.content.appendChild(this.sep());
 
         // global actions
         const actionsGroup = document.createElement("div");
@@ -423,22 +508,18 @@ export class Palette {
             this.btn(ICONS.export, this.deps.i18n("exportImage"), () => this.deps.onAction("export")),
             this.btn(ICONS.trash, this.deps.i18n("clearAll"), () => this.deps.onAction("clear")),
         );
-        this.toolbar.appendChild(actionsGroup);
+        this.content.appendChild(actionsGroup);
 
-        this.toolbar.appendChild(this.sep());
-        this.toolbar.appendChild(
+        this.content.appendChild(this.sep());
+        this.content.appendChild(
             this.btn(ICONS.gear, this.deps.i18n("settings"), () => this.deps.onAction("settings")),
         );
-        this.toolbar.appendChild(
+        this.content.appendChild(
             this.btn(ICONS.collapse, this.deps.i18n("collapse"), () => this.deps.onAction("collapse")),
         );
 
-        // keep inside viewport after re-render (size may have changed)
-        this.applyDockClass();
-        const x = parseFloat(this.toolbar.style.left || "0");
-        const y = parseFloat(this.toolbar.style.top || "0");
-        this.place(this.toolbar, {x, y});
-        this.snapToDock();
+        this.sizeObserver?.observe(this.content);
+        this.repositionAfterLayout(previous);
     }
 
     private sep(): HTMLDivElement {
@@ -454,15 +535,16 @@ export class Palette {
         this.toolbar.style.display = on ? "" : "none";
         this.handle.style.display = on || !this.showHandle ? "none" : "";
         this.handle.classList.toggle("pa-handle--on", on);
-        if (on) {
-            if (this.dock === "free") this.placeDefaultIfFloating();
-            else this.snapToDock();
-        }
+        if (on && this.dock === "free") this.placeDefaultIfFloating();
+        // Hidden controls have no measurable size. Clamp again after display is
+        // restored, including when a saved floating position already exists.
+        this.repositionForViewport();
     }
 
     setHandleVisible(visible: boolean) {
         this.showHandle = visible;
         this.handle.style.display = this.state.mode || !visible ? "none" : "";
+        this.repositionForViewport();
     }
 
     update(state: Partial<PaletteState>) {
@@ -482,19 +564,26 @@ export class Palette {
     }
 
     destroy() {
+        this.destroyed = true;
         this.stopDrag?.();
+        if (this.positionFrame !== null) cancelAnimationFrame(this.positionFrame);
+        this.positionFrame = null;
+        this.sizeObserver?.disconnect();
+        window.removeEventListener('resize', this.requestReposition);
+        this.visualViewport?.removeEventListener('resize', this.requestReposition);
+        this.visualViewport?.removeEventListener('scroll', this.requestReposition);
         this.toolbar.remove();
         this.handle.remove();
     }
 
     repositionForViewport() {
-        this.place(this.toolbar, {
-            x: parseFloat(this.toolbar.style.left || "0"),
-            y: parseFloat(this.toolbar.style.top || "0"),
-        });
-        this.snapToDock();
-        const hx = parseFloat(this.handle.style.left || "0");
-        const hy = parseFloat(this.handle.style.top || "0");
-        this.place(this.handle, {x: hx, y: hy});
+        if (this.destroyed) return;
+        this.applyDockClass();
+        if (this.toolbar.style.display !== 'none') {
+            this.place(this.toolbar, {x: parseFloat(this.toolbar.style.left || '0'), y: parseFloat(this.toolbar.style.top || '0')});
+            this.snapToDock();
+            this.toolbar.classList.toggle('pa-toolbar--scrollable', this.content.scrollHeight > this.content.clientHeight + 1);
+        }
+        if (this.handle.style.display !== 'none') this.place(this.handle, {x: parseFloat(this.handle.style.left || '0'), y: parseFloat(this.handle.style.top || '0')});
     }
 }
